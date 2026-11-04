@@ -1,4 +1,4 @@
-# [Project Name]
+# Saathi
 
 > [A short tagline describing your project.]
 
