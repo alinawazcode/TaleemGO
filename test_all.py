@@ -34,14 +34,11 @@ for c in courses:
     print(f"  {c.get('code'):10s} {c.get('name')}")
 print(f"  -> {len(courses)} courses")
 
-# ---------- assignments ----------
-section("ASSIGNMENTS (all, with local time)")
-assignments = lms.get_assignments()
-now = datetime.now(timezone.utc)
+# ---------- assignments (submission-aware) ----------
+section("ASSIGNMENTS (status checked against your submissions)")
+assignments = lms.get_assignments_with_status()
 for a in assignments:
-    due = datetime.fromisoformat(a["due_date"].replace("Z", "+00:00"))
-    status = "OVERDUE" if due < now else "upcoming"
-    print(f"  [{status:8s}] {to_local(a['due_date'])}  {a['title']}")
+    print(f"  [{a['status']:14s}] {to_local(a['due_date'])}  {a['title']}")
 print(f"  -> {len(assignments)} assignments")
 
 # ---------- resources, grouped like the bot will show them ----------
