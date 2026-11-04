@@ -1,2 +1,5 @@
 .env
 codexchat.md
+tokens.json
+downloads/
+__pycache__
