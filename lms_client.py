@@ -19,6 +19,7 @@ import json
 import os
 import re
 import time
+from datetime import datetime, timezone
 from urllib.parse import unquote, urlparse
 
 import requests
@@ -199,6 +200,49 @@ class LMSClient:
             courses[c["id"]] = summarize(statuses)
             all_statuses += statuses
         return {"overall": summarize(all_statuses), "courses": courses}
+
+    def get_submissions(self):
+        """Your own submission records, keyed by assignment_id for easy lookup."""
+        rows = self._get(
+            "assignment_submissions",
+            select="assignment_id,file_name,submitted_at,grade",
+            student_id=f"eq.{self.student_id}",
+        )
+        return {r["assignment_id"]: r for r in rows}
+
+    def get_assignments_with_status(self, course_id=None):
+        """
+        Assignments annotated with submission status.
+        status: "submitted" (has a file), "logged_no_file" (record but no file),
+                "overdue" (past due, nothing submitted), "pending" (not due yet).
+        """
+        assignments = self.get_assignments(course_id)
+        submissions = self.get_submissions()
+        now = datetime.now(timezone.utc)
+
+        out = []
+        for a in assignments:
+            due = datetime.fromisoformat(a["due_date"].replace("Z", "+00:00"))
+            sub = submissions.get(a["id"])
+            if sub and sub.get("file_name"):
+                status = "submitted"
+            elif sub:
+                status = "logged_no_file"
+            elif due < now:
+                status = "overdue"
+            else:
+                status = "pending"
+            out.append({**a, "status": status, "submission": sub})
+        return out
+
+    def get_clos(self, course_id):
+        """Course Learning Outcomes for one course, ordered by clo_number."""
+        return self._get(
+            "course_clos",
+            select="clo_number,description,bt_level",
+            course_id=f"eq.{course_id}",
+            order="clo_number.asc",
+        )
 
     # ---------- download ----------
 
