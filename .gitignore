@@ -1,2 +1,8 @@
 .env
 codexchat.md
+tokens.json
+downloads/
+__pycache__
+data/
+app/__pycache__/
+scripts/__pycache__/
