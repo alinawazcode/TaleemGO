@@ -20,14 +20,23 @@ import os
 import re
 import time
 from datetime import datetime, timezone
+from pathlib import Path
 from urllib.parse import unquote, urlparse
 
 import requests
 from dotenv import load_dotenv
 
-load_dotenv()
+# Resolve paths relative to the project root (one level above app/), not the
+# current working directory - this way it works whether you run
+# "python app/bot.py" from Saathi/ or "python bot.py" from inside app/.
+ROOT_DIR = Path(__file__).resolve().parent.parent
+DATA_DIR = ROOT_DIR / "data"
+DATA_DIR.mkdir(parents=True, exist_ok=True)
 
-TOKEN_FILE = "tokens.json"
+load_dotenv(ROOT_DIR / ".env")
+
+TOKEN_FILE = str(DATA_DIR / "tokens.json")
+DEFAULT_DOWNLOAD_DIR = str(DATA_DIR / "downloads")
 REFRESH_MARGIN = 300            # refresh when < 5 minutes left
 MAX_DOWNLOAD_BYTES = 50 * 1024 * 1024   # Telegram bot upload limit is 50 MB
 ALLOWED_EXTENSIONS = {".pdf", ".ppt", ".pptx", ".doc", ".docx", ".txt"}
@@ -284,7 +293,7 @@ class LMSClient:
         name = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", name)
         return name or fallback
 
-    def download_resource(self, resource_id, folder="downloads"):
+    def download_resource(self, resource_id, folder=DEFAULT_DOWNLOAD_DIR):
         """Returns the saved file path. Raises LMSError on any problem."""
         self.ensure_session()
         r = self.web.get(
