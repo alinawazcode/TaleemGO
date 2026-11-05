@@ -235,6 +235,31 @@ class LMSClient:
             out.append({**a, "status": status, "submission": sub})
         return out
 
+    def get_attendance_records_detailed(self):
+        """
+        One row per attendance record, joined with its session's course and date.
+        Used by the monitor to detect newly-marked attendance.
+        NOTE: selects only id/course_id/title/date from sessions - never qr_token.
+        """
+        sessions = {s["id"]: s for s in self._get(
+            "attendance_sessions", select="id,course_id,title,date")}
+        records = self._get(
+            "attendance_records", select="id,session_id,status,marked_at",
+            student_id=f"eq.{self.student_id}")
+        out = []
+        for r in records:
+            s = sessions.get(r["session_id"])
+            if not s:
+                continue
+            out.append({
+                "id": r["id"],
+                "course_id": s["course_id"],
+                "title": s.get("title"),
+                "date": s.get("date"),
+                "status": r["status"],
+            })
+        return out
+
     def get_clos(self, course_id):
         """Course Learning Outcomes for one course, ordered by clo_number."""
         return self._get(
