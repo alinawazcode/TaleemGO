@@ -18,13 +18,24 @@ import base64
 import json
 import os
 import re
+import socket
 import time
 from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import unquote, urlparse
 
 import requests
+import urllib3.util.connection as urllib3_cn
 from dotenv import load_dotenv
+
+# Force IPv4 for all `requests` calls (Supabase REST + LMS site). Same root
+# cause as the Telegram bot fix: the VPN needed here (Telegram is ISP-blocked
+# in Pakistan) doesn't tunnel IPv6, so IPv6 attempts hit the raw ISP block
+# and fail intermittently even though IPv4 works fine.
+def _allowed_gai_family():
+    return socket.AF_INET
+
+urllib3_cn.allowed_gai_family = _allowed_gai_family
 
 # Resolve paths relative to the project root (one level above app/), not the
 # current working directory - this way it works whether you run
