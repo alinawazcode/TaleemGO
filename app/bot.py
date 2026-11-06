@@ -19,6 +19,8 @@ from dotenv import load_dotenv
 from telegram import Update
 from telegram.constants import ParseMode
 from telegram.ext import Application, CommandHandler, ContextTypes
+import httpx
+from telegram.request import HTTPXRequest
 
 from lms_client import LMSClient, LMSError
 from monitor import check_updates
@@ -230,7 +232,23 @@ async def clos_cmd(update, context):
 
 
 def main():
-    app = Application.builder().token(os.environ["TELEGRAM_BOT_TOKEN"]).build()
+    # Longer timeouts than PTB's defaults - a VPN tunnel (needed in Pakistan,
+    # where Telegram is ISP-blocked) adds latency and occasional hiccups that
+    # the default 5-10s timeouts treat as failures.
+    request = HTTPXRequest(
+        connect_timeout=20.0,
+        read_timeout=30.0,
+        write_timeout=20.0,
+        pool_timeout=20.0,
+        # Force IPv4: some VPNs don't tunnel IPv6, letting IPv6 traffic hit
+        # the ISP block directly even while IPv4 is fine.
+        httpx_kwargs={"transport": httpx.AsyncHTTPTransport(local_address="0.0.0.0")},
+    )
+    app = (Application.builder()
+           .token(os.environ["TELEGRAM_BOT_TOKEN"])
+           .request(request)
+           .get_updates_request(request)
+           .build())
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("help", start))
     app.add_handler(CommandHandler("courses", courses_cmd))
