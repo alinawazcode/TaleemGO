@@ -1,4 +1,5 @@
 """Thin client for the local WhatsApp bridge — multi-user version."""
+import logging
 import os
 import time
 import threading
@@ -10,6 +11,8 @@ load_dotenv(Path(__file__).resolve().parent.parent / ".env")
 
 BRIDGE = os.environ.get("BRIDGE_URL", "http://127.0.0.1:3001")
 _TOKEN = os.environ.get("BRIDGE_TOKEN", "")
+
+log = logging.getLogger("sathi.wa_transport")
 
 _send_lock = threading.Lock()
 _last_send = 0.0
@@ -42,6 +45,13 @@ def send_text(chat_id: str, text: str) -> None:
             if r.status_code == 503 and attempt == 1:
                 time.sleep(3)
                 continue
+            if not r.ok:
+                err_msg = ""
+                try:
+                    err_msg = r.json().get("error", r.text[:200])
+                except Exception:
+                    err_msg = r.text[:200]
+                log.error("Bridge error sending to %s…: status=%s, err=%s", chat_id[-6:], r.status_code, err_msg)
             r.raise_for_status()
             return
         except requests.HTTPError:
@@ -62,6 +72,13 @@ def send_file(chat_id: str, path: str, caption: str = "") -> None:
             if r.status_code == 503 and attempt == 1:
                 time.sleep(3)
                 continue
+            if not r.ok:
+                err_msg = ""
+                try:
+                    err_msg = r.json().get("error", r.text[:200])
+                except Exception:
+                    err_msg = r.text[:200]
+                log.error("Bridge error sending file to %s…: status=%s, err=%s", chat_id[-6:], r.status_code, err_msg)
             r.raise_for_status()
             return
         except requests.HTTPError:

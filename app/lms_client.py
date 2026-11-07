@@ -124,8 +124,9 @@ class LMSClient:
         if "expires_at" not in data:
             data["expires_at"] = int(time.time()) + int(data.get("expires_in", 3600))
         self.session_data = data
-        # Do NOT persist the password — discard it after first successful login
-        self._password = None
+        # Only discard the password for encrypted tokens (.enc) — legacy unencrypted tokens keep it
+        if self._encrypted:
+            self._password = None
 
         raw = json.dumps(data, separators=(",", ":")).encode("utf-8")
         self._write_token_bytes(raw)
