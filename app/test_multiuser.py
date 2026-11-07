@@ -23,7 +23,7 @@ os.environ.setdefault("SUPABASE_URL", "https://fake.supabase.co")
 os.environ.setdefault("SUPABASE_ANON_KEY", "fake_key")
 os.environ.setdefault("LMS_BASE_URL", "https://fake-lms.example.com")
 os.environ.setdefault("BRIDGE_TOKEN", "test_token")
-os.environ.setdefault("SATHI_SECRET_KEY", "test_secret_key_32_bytes_len_1234=")
+os.environ.setdefault("TALEEMGO_SECRET_KEY", "test_secret_key_32_bytes_len_1234=")
 
 import users as usr
 import state as st
@@ -294,23 +294,38 @@ class MultiUserTests(unittest.TestCase):
         self.assertIsNone(usr.get_user(chat_id2))
 
     def test_unknown_chat_activation_phrase_welcomes(self):
-        """Unknown chat + 'Hi Saathi AI' -> row created and welcome sent; 'Sathi AI' works."""
+        """Unknown chat + 'Hi TaleemGo AI' -> row created and welcome sent; 'Taleem Go AI' and 'TALEEMGO' work."""
         chat_id1 = "user_act1@c.us"
-        wa_bot.handle(chat_id1, "Hi Saathi AI")
+        wa_bot.handle(chat_id1, "Hi TaleemGo AI")
         self.assertEqual(len(self.sent_texts), 1)
-        self.assertIn("Welcome to Saathi", self.sent_texts[0][1])
+        self.assertIn("Welcome to TaleemGo AI", self.sent_texts[0][1])
         u1 = usr.get_user(chat_id1)
         self.assertIsNotNone(u1)
         self.assertEqual(u1["status"], "awaiting_email")
 
-        # Case-insensitive with punctuation and "Sathi AI"
+        # Case-insensitive with punctuation and "Taleem Go AI"
         chat_id2 = "user_act2@c.us"
-        wa_bot.handle(chat_id2, "Hello, Sathi AI! Can you help?")
+        wa_bot.handle(chat_id2, "Hello, Taleem Go AI! Can you help?")
         self.assertEqual(len(self.sent_texts), 2)
-        self.assertIn("Welcome to Saathi", self.sent_texts[1][1])
+        self.assertIn("Welcome to TaleemGo AI", self.sent_texts[1][1])
         u2 = usr.get_user(chat_id2)
         self.assertIsNotNone(u2)
         self.assertEqual(u2["status"], "awaiting_email")
+
+        # Uppercase "TALEEMGO"
+        chat_id3 = "user_act3@c.us"
+        wa_bot.handle(chat_id3, "TALEEMGO")
+        self.assertEqual(len(self.sent_texts), 3)
+        self.assertIn("Welcome to TaleemGo AI", self.sent_texts[2][1])
+        u3 = usr.get_user(chat_id3)
+        self.assertIsNotNone(u3)
+        self.assertEqual(u3["status"], "awaiting_email")
+
+        # Old phrase "saathi ai" no longer activates
+        chat_id4 = "user_act4@c.us"
+        wa_bot.handle(chat_id4, "Hi saathi ai")
+        self.assertEqual(len(self.sent_texts), 3)
+        self.assertIsNone(usr.get_user(chat_id4))
 
     def test_stale_signup_cleanup_15_minutes(self):
         """Stale sign-ups older than 15 minutes are purged; active users remain."""

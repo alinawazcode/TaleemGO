@@ -1,5 +1,5 @@
 """
-courses.py - Course resolution and formatting for Saathi.
+courses.py - Course resolution and formatting for TaleemGo.
 """
 import difflib
 import re

@@ -7,6 +7,7 @@ const path = require("path");
 
 const file = process.argv[2] ||
   path.join(__dirname, "node_modules", "whatsapp-web.js", "src", "util", "Injected", "Utils.js");
+// Historical identifier preserved for compatibility with already-patched node_modules
 const MARK = "/*saathi-patch*/";
 
 if (!fs.existsSync(file)) {

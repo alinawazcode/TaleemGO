@@ -12,7 +12,7 @@ from datetime import datetime, timezone
 from state import load_state, save_state
 from timeutils import to_local
 
-log = logging.getLogger("sathi.monitor")
+log = logging.getLogger("taleemgo.monitor")
 
 REMINDER_WINDOWS = [(3, "3 day"), (1, "1 day")]  # (days before due, label)
 

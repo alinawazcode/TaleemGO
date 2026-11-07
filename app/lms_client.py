@@ -1,12 +1,12 @@
 """
-lms_client.py - Sathi LMS client (multi-user capable).
+lms_client.py - TaleemGo LMS client (multi-user capable).
 
 LMSClient(email, password, token_file) for per-user instances.
 LMSClient()                             for the legacy Telegram bot (reads from .env).
 
 .env needs: SUPABASE_URL, SUPABASE_ANON_KEY, LMS_BASE_URL
 Optional:   LMS_EMAIL, LMS_PASSWORD (Telegram bot only)
-            SATHI_SECRET_KEY (Fernet key; auto-generated on first run if absent)
+            TALEEMGO_SECRET_KEY (Fernet key; auto-generated on first run if absent; falls back to SATHI_SECRET_KEY)
 """
 
 import base64
@@ -52,18 +52,23 @@ class LMSAuthExpired(LMSError):
 
 
 def _fernet():
-    """Return a Fernet instance, generating+saving SATHI_SECRET_KEY if missing."""
+    """Return a Fernet instance, generating+saving TALEEMGO_SECRET_KEY if missing (falls back to SATHI_SECRET_KEY)."""
     from cryptography.fernet import Fernet
-    key = os.environ.get("SATHI_SECRET_KEY", "")
+    import logging
+    log = logging.getLogger("taleemgo.lms")
+    key = os.environ.get("TALEEMGO_SECRET_KEY", "")
     if not key:
-        import logging
+        key = os.environ.get("SATHI_SECRET_KEY", "")
+        if key:
+            log.info("Using deprecated SATHI_SECRET_KEY; please rename to TALEEMGO_SECRET_KEY in .env")
+    if not key:
         key = Fernet.generate_key().decode()
         env_path = ROOT_DIR / ".env"
         with open(env_path, "a", encoding="utf-8") as f:
-            f.write(f"\nSATHI_SECRET_KEY={key}\n")
-        os.environ["SATHI_SECRET_KEY"] = key
-        logging.getLogger("sathi.lms").warning(
-            "Generated new SATHI_SECRET_KEY and appended to .env — back it up!")
+            f.write(f"\nTALEEMGO_SECRET_KEY={key}\n")
+        os.environ["TALEEMGO_SECRET_KEY"] = key
+        log.warning(
+            "Generated new TALEEMGO_SECRET_KEY and appended to .env — back it up!")
     return Fernet(key.encode() if isinstance(key, str) else key)
 
 

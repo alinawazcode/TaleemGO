@@ -13,7 +13,7 @@ from courses import course_acronym
 import wa_transport as wa
 import users as usr
 
-log = logging.getLogger("sathi.wa_monitor")
+log = logging.getLogger("taleemgo.wa_monitor")
 REMINDER_WINDOWS = [(3, "3 day"), (1, "1 day")]
 
 

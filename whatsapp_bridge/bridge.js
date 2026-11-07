@@ -1,4 +1,4 @@
-// Saathi WhatsApp bridge — multi-user version.
+// TaleemGo WhatsApp bridge — multi-user version.
 // Forwards every incoming 1:1 message to Python with { chat_id, text }.
 // /send and /send-file accept { chat_id, text/path/caption } in the body.
 require("dotenv").config();

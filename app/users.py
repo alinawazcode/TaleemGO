@@ -1,5 +1,5 @@
 """
-users.py - Multi-user registry for Saathi WhatsApp bot.
+users.py - Multi-user registry for TaleemGo WhatsApp bot.
 
 Responsibilities:
 - SQLite users table (chat_id, email, status, attempt, is_admin, created_at, last_seen)
@@ -36,7 +36,7 @@ USERS_DIR.mkdir(parents=True, exist_ok=True)
 
 MAX_USERS = int(os.environ.get("MAX_USERS", "5"))
 
-log = logging.getLogger("sathi.users")
+log = logging.getLogger("taleemgo.users")
 
 # --- DB setup ---
 

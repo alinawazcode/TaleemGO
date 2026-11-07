@@ -1,77 +1,52 @@
-# Saathi
+# TaleemGo AI
 
-> [A short tagline describing your project.]
+> Your LMS assistant on WhatsApp.
 
 ## Overview
 
-[Describe what the project does, who it is for, and the problem it solves.]
+TaleemGo AI connects students with their university LMS over WhatsApp. It tracks courses, attendance, upcoming assignment deadlines, and allows downloading lecture materials directly within WhatsApp.
 
 ## Features
 
-- [Feature one]
-- [Feature two]
-- [Feature three]
+- Multi-user support with isolated sessions and encrypted token storage.
+- Course registration, attendance tracking, and lecture file downloads.
+- Real-time automated deadline reminders and lecture upload notifications.
+- Bilingual and natural language understanding support.
 
 ## Getting Started
 
 ### Prerequisites
 
-- [Required tool or runtime and version]
-- [Other prerequisite]
+- Node.js (v18+)
+- Python (3.10+)
+- Google Chrome
 
 ### Installation
 
 1. Clone the repository:
 
    ```bash
-   git clone [repository-url]
-   cd [repository-directory]
+   git clone https://github.com/alinawazcode/Saathi.git
+   cd Saathi
    ```
 
 2. Install dependencies:
 
    ```bash
-   [installation-command]
+   pip install -r requirements.txt
+   cd whatsapp_bridge
+   npm install
+   cd ..
    ```
 
 3. Configure the project:
-
-   ```bash
-   [configuration-command]
-   ```
-
-## Usage
-
-```bash
-[command-to-run-the-project]
-```
-
-[Add examples or instructions for common use cases.]
-
-## Configuration
-
-| Name | Description | Required |
-|------|-------------|----------|
-| `[SETTING_NAME]` | [What this setting controls] | [Yes/No] |
-
-## Tests
-
-```bash
-[command-to-run-tests]
-```
-
-## Contributing
-
-Contributions are welcome. [Add instructions for reporting issues, proposing changes, and submitting pull requests.]
-
-## License
-
-[Specify the license for this project.]
-
+   Copy `.env.example` to `.env` and fill in your values.
+   > **Note for existing users:** If you have an existing `.env` file, please update `ACTIVATION_PHRASES` to `taleemgo ai,taleem go ai,taleemgo` (or remove that line to use the new default). You should also rename `SATHI_SECRET_KEY` to `TALEEMGO_SECRET_KEY` (the bot will still read `SATHI_SECRET_KEY` for backwards compatibility).
+   > **WhatsApp Profile:** The WhatsApp profile name and avatar for the bot's number must be configured manually in the WhatsApp app on the linked device.
 
 ## WhatsApp Multi-User Bot
 
-Saathi serves multiple students at once. Each WhatsApp number gets its own private LMS account, session, and monitor.
+TaleemGo AI serves multiple students at once. Each WhatsApp number gets its own private LMS account, session, and monitor.
 
 ### How to run
 
@@ -90,7 +65,7 @@ Scan the QR code with WhatsApp on the linked phone → Linked Devices → Link a
 
 ### First-time user flow
 
-1. Send any message to the bot's WhatsApp number.
+1. Send an activation phrase (e.g. `Hi TaleemGo AI`) to the bot's WhatsApp number.
 2. The bot asks for your LMS email, then your password (used once, never stored).
 3. On success you receive "Connected as …" and the full help text.
 4. From then on, all commands and automatic alerts are private to your account.

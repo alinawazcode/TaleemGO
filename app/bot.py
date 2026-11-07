@@ -1,5 +1,5 @@
 """
-bot.py - Sathi Telegram bot (single user).
+bot.py - TaleemGo Telegram bot (single user).
 
 .env needs (in addition to the LMS vars):
   TELEGRAM_BOT_TOKEN=<from BotFather>
@@ -29,7 +29,7 @@ from timeutils import to_local
 load_dotenv(Path(__file__).resolve().parent.parent / ".env")
 logging.basicConfig(level=logging.INFO,
                      format="%(asctime)s %(levelname)s %(message)s")
-log = logging.getLogger("sathi")
+log = logging.getLogger("taleemgo")
 
 AUTHORIZED_ID = int(os.environ["AUTHORIZED_TELEGRAM_ID"])
 MONITOR_INTERVAL_MIN = int(os.environ.get("MONITOR_INTERVAL_MINUTES", "30"))
@@ -72,7 +72,7 @@ def authorized(handler):
 @authorized
 async def start(update, context):
     await update.message.reply_text(
-        "Sathi is online.\n\n"
+        "TaleemGo is online.\n\n"
         "/courses - your enrolled courses\n"
         "/assignments - all assignments, with status\n"
         "/upcoming - only pending/overdue, soonest first\n"
@@ -265,7 +265,7 @@ def main():
     app.job_queue.run_repeating(
         check_updates, interval=MONITOR_INTERVAL_MIN * 60, first=15)
 
-    log.info("Sathi bot starting (long polling, monitor every %d min)...",
+    log.info("TaleemGo bot starting (long polling, monitor every %d min)...",
               MONITOR_INTERVAL_MIN)
     app.run_polling()
 

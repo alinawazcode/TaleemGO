@@ -26,7 +26,7 @@ import wa_transport as wa                                               # noqa: 
 import users as usr                                                     # noqa: E402
 from wa_monitor import run_all_users                                    # noqa: E402
 
-log = logging.getLogger("sathi.wa")
+log = logging.getLogger("taleemgo.wa")
 logging.basicConfig(level=logging.INFO)
 
 TOKEN = os.environ.get("BRIDGE_TOKEN", "")
@@ -35,12 +35,12 @@ ATTENDANCE_WARN = float(os.environ.get("ATTENDANCE_WARN", "75"))
 
 ACTIVATION_PHRASES = [
     p.strip().lower()
-    for p in os.environ.get("ACTIVATION_PHRASES", "saathi ai,sathi ai").split(",")
+    for p in os.environ.get("ACTIVATION_PHRASES", "taleemgo ai,taleem go ai,taleemgo").split(",")
     if p.strip()
 ]
 
 HELP = (
-    "Saathi commands:\n"
+    "TaleemGo AI commands:\n"
     "courses\nassignments\nupcoming\n"
     "resources <course>\nattendance [course]\nclos <course>\n"
     "download <course> [week N | title]\n"
@@ -49,7 +49,7 @@ HELP = (
 )
 
 WELCOME = (
-    "👋 Welcome to Saathi — your LMS assistant on WhatsApp!\n\n"
+    "👋 Welcome to TaleemGo AI — your LMS assistant on WhatsApp!\n\n"
     "To get started, please send me your *LMS email address*.\n\n"
     "Send your LMS email to begin."
 )
@@ -515,14 +515,14 @@ def _handle_locked(chat_id: str, text: str, is_self: bool = False):
                 # Do nothing at all: no reply, no DB row, no directory, no log of text
                 return
             if not usr.try_register(chat_id, is_admin=False):
-                _reply(chat_id, f"Saathi is full right now ({MAX_USERS}/{MAX_USERS} users). Please try again later.")
+                _reply(chat_id, f"TaleemGo AI is full right now ({MAX_USERS}/{MAX_USERS} users). Please try again later.")
                 return
             _reply(chat_id, WELCOME)
             return
         else:
             # Self-chat skips activation phrase
             if not usr.try_register(chat_id, is_admin=True):
-                _reply(chat_id, f"Saathi is full right now ({MAX_USERS}/{MAX_USERS} users). Please try again later.")
+                _reply(chat_id, f"TaleemGo AI is full right now ({MAX_USERS}/{MAX_USERS} users). Please try again later.")
                 return
             _reply(chat_id, WELCOME)
             return
@@ -667,7 +667,7 @@ def _handle_active(chat_id: str, text: str, user: dict):
 
 def _do_logout(chat_id: str):
     usr.purge_user_data(chat_id)
-    _reply(chat_id, 'Logged out and all your data deleted. Send "Hi Saathi AI" to start again.')
+    _reply(chat_id, 'Logged out and all your data deleted. Send "Hi TaleemGo AI" to start again.')
 
 
 def _do_login_reset(chat_id: str):
@@ -678,7 +678,7 @@ def _do_login_reset(chat_id: str):
         _reply(chat_id, "Please send your LMS email to sign in.")
     else:
         if not usr.try_register(chat_id, is_admin=False):
-            _reply(chat_id, f"Saathi is full right now ({MAX_USERS}/{MAX_USERS} users). Please try again later.")
+            _reply(chat_id, f"TaleemGo AI is full right now ({MAX_USERS}/{MAX_USERS} users). Please try again later.")
             return
         _reply(chat_id, "Please send your LMS email to sign in.")
 
