@@ -22,6 +22,7 @@ sys.path.insert(0, str(ROOT / "app"))
 
 import users as usr
 import wa_bot
+import requests
 from lms_client import LMSError
 from app.llm.intent import (
     ALLOWED_INTENTS,
@@ -43,10 +44,17 @@ from app.llm.lang_data import (
 )
 from app.llm.providers import (
     AuthError,
+    BadModelError,
+    ClientError,
+    PROVIDER_CONFIGS,
     ProviderState,
     RateLimitError,
     ServerOrNetworkError,
+    call_chat_completions,
+    get_provider_models,
+    is_valid_api_key,
     registry,
+    run_live_check,
 )
 from app.llm.router import route_intent
 from app.llm.rules import detect_language, match_rules
@@ -129,8 +137,8 @@ class LLMBaseTestCase(unittest.TestCase):
             usr._user_strikes.clear()
         with usr._hourly_lock:
             usr._user_hourly_calls.clear()
-        with wa_bot._busy_lock:
-            wa_bot._user_busy_sent.clear()
+        with wa_bot._help_lock:
+            wa_bot._user_help_sent.clear()
         clear_user_history("all")
         with registry._lock:
             registry._states.clear()
@@ -143,19 +151,20 @@ class LLMBaseTestCase(unittest.TestCase):
         wa_bot.wa.send_text = lambda cid, msg: self.sent_texts.append((cid, msg))
         wa_bot.wa.send_file = lambda cid, path, cap="": self.sent_files.append((cid, path, cap))
 
-        # Default environment
+        # Default environment with valid length (>= 20 chars) keys
         os.environ["LLM_ENABLED"] = "1"
-        os.environ["LLM_PROVIDERS"] = "gemini,groq,openrouter,cerebras"
-        os.environ["GEMINI_API_KEY"] = "fake-gemini-key"
-        os.environ["GROQ_API_KEY"] = "fake-groq-key"
-        os.environ["OPENROUTER_API_KEY"] = "fake-openrouter-key"
-        os.environ["CEREBRAS_API_KEY"] = "fake-cerebras-key"
+        os.environ["LLM_PROVIDERS"] = "gemini,groq"
+        os.environ["GEMINI_API_KEY"] = "fake-gemini-key-1234567890"
+        os.environ["GROQ_API_KEY"] = "fake-groq-key-1234567890"
+        os.environ["OPENROUTER_API_KEY"] = "fake-openrouter-key-1234567890"
+        os.environ["CEREBRAS_API_KEY"] = "fake-cerebras-key-1234567890"
         os.environ["LLM_NOTIFY_ON_LOCK"] = "1"
         os.environ["LLM_LOCK_HOURS"] = "2"
         os.environ["LLM_STRIKES"] = "2"
         os.environ["LLM_STRIKE_WINDOW_MIN"] = "10"
         os.environ["LLM_ADMIN_EXEMPT"] = "1"
         os.environ["GREETING_REPLY"] = "1"
+        os.environ["LLM_HELP_REPLY_INTERVAL_MIN"] = "2"
 
         self.patcher_post = patch("requests.post", side_effect=RuntimeError("Unexpected real HTTP call!"))
         self.patcher_post.start()
@@ -298,6 +307,15 @@ class TestWhitelistAndSecurity(LLMBaseTestCase):
         long_query = "A" * 500
         with self.assertRaises(ValueError):
             validate_intent_response({"lang": "en", "actions": [{"intent": "attendance", "course_query": long_query}], "clarify": None, "off_topic": False})
+
+        # 8. Unsupported true with actions raises ValueError
+        with self.assertRaises(ValueError):
+            validate_intent_response({"lang": "en", "actions": [{"intent": "courses"}], "clarify": None, "off_topic": False, "unsupported": True})
+
+        # 9. Valid unsupported response
+        valid_unsup = validate_intent_response({"lang": "en", "actions": [], "clarify": None, "off_topic": False, "unsupported": True})
+        self.assertTrue(valid_unsup["unsupported"])
+        self.assertEqual(len(valid_unsup["actions"]), 0)
 
     @patch("app.llm.router.call_chat_completions")
     def test_jailbroken_model_output_never_sent_to_user(self, mock_call):
@@ -509,12 +527,22 @@ class TestOffTopicPolicy(LLMBaseTestCase):
         wa_bot.handle(admin_chat, "llm")
         self.assertTrue(any("TaleemGo AI LLM Status:" in txt for _, txt in self.sent_texts))
 
+        # Admin runs 'llm test'
+        self.sent_texts.clear()
+        wa_bot.handle(admin_chat, "llm test")
+        self.assertTrue(any("TaleemGo AI LLM Test:" in txt for _, txt in self.sent_texts))
+
         # Normal user runs 'llm' -> ignored
         normal_chat = "norm@c.us"
         usr.upsert_user(normal_chat, email="norm@test.com", status="active", is_admin=0)
         usr.set_client(normal_chat, lms)
         self.sent_texts.clear()
         wa_bot.handle(normal_chat, "llm")
+        self.assertEqual(len(self.sent_texts), 0)
+
+        # Normal user runs 'llm test' -> ignored
+        self.sent_texts.clear()
+        wa_bot.handle(normal_chat, "llm test")
         self.assertEqual(len(self.sent_texts), 0)
 
     @patch("app.llm.router.call_chat_completions")
@@ -711,6 +739,215 @@ class TestSindhiAndLanguages(LLMBaseTestCase):
         self.sent_texts.clear()
         wa_bot.handle(chat_id, "random unknown text")
         self.assertTrue(any("TaleemGo AI commands:" in txt for _, txt in self.sent_texts))
+
+
+class TestModelFailoverAndClassification(LLMBaseTestCase):
+    @patch("requests.post")
+    def test_model_list_failover_on_404(self, mock_post):
+        """When first model returns 404, immediately tries next model in list and succeeds."""
+        os.environ["GEMINI_MODELS"] = "model-dead,model-working"
+
+        resp_404 = MagicMock()
+        resp_404.status_code = 404
+        resp_404.text = '{"error": {"code": 404, "message": "model-dead is no longer available"}}'
+
+        resp_200 = MagicMock()
+        resp_200.status_code = 200
+        resp_200.json.return_value = {
+            "choices": [{"message": {"content": '{"lang": "en", "actions": [{"intent": "courses"}], "clarify": null, "off_topic": false, "unsupported": False}'}}],
+            "usage": {"prompt_tokens": 120, "completion_tokens": 25, "total_tokens": 145}
+        }
+        mock_post.side_effect = [resp_404, resp_200]
+
+        content = call_chat_completions("gemini", messages=[{"role": "user", "content": "show courses"}])
+        self.assertIn("courses", content)
+        self.assertEqual(mock_post.call_count, 2)
+
+        # Check active model is remembered
+        state = registry.get_state("gemini")
+        self.assertEqual(state.active_model, "model-working")
+        self.assertIn("model-dead", state.bad_models)
+
+    @patch("requests.post")
+    def test_all_models_fail_disables_provider_and_logs_error(self, mock_post):
+        """When all models in provider list return 404, provider is marked 'bad model' and disabled."""
+        os.environ["GROQ_MODELS"] = "dead-1,dead-2"
+
+        resp_404 = MagicMock()
+        resp_404.status_code = 404
+        resp_404.text = '{"error": {"code": 404, "message": "not found"}}'
+        mock_post.return_value = resp_404
+
+        with self.assertLogs("taleemgo.llm.providers", level="ERROR") as cm:
+            with self.assertRaises(BadModelError):
+                call_chat_completions("groq", messages=[{"role": "user", "content": "test"}])
+
+            log_output = "\n".join(cm.output)
+            self.assertIn("GROQ_MODELS", log_output)
+            self.assertIn("not found", log_output)
+
+        state = registry.get_state("groq")
+        self.assertTrue(state.disabled)
+        self.assertEqual(state.status_override, "bad model")
+
+        summary = registry.get_summary()
+        self.assertEqual(summary["groq"]["status"], "bad model")
+
+    @patch("requests.post")
+    def test_response_format_400_retry_without_json_mode(self, mock_post):
+        """HTTP 400 with response_format retries once without json_mode and remembers supports_json_mode=False."""
+        resp_400 = MagicMock()
+        resp_400.status_code = 400
+        resp_400.text = '{"error": {"message": "unsupported response_format: json_object"}}'
+
+        resp_200 = MagicMock()
+        resp_200.status_code = 200
+        resp_200.json.return_value = {
+            "choices": [{"message": {"content": '{"lang": "en", "actions": [{"intent": "help"}], "clarify": null, "off_topic": false, "unsupported": False}'}}]
+        }
+        mock_post.side_effect = [resp_400, resp_200]
+
+        content = call_chat_completions("groq", messages=[{"role": "user", "content": "help me"}], json_mode=True)
+        self.assertIn("help", content)
+        state = registry.get_state("groq")
+        self.assertFalse(state.supports_json_mode)
+
+    def test_placeholder_key_detection(self):
+        """Keys shorter than 20 chars or containing 'your', 'here', 'xxxx', 'changeme' are detected as missing."""
+        self.assertFalse(is_valid_api_key(""))
+        self.assertFalse(is_valid_api_key("short_key"))
+        self.assertFalse(is_valid_api_key("sk-or-your_openrouter_api_key_here"))
+        self.assertFalse(is_valid_api_key("csk_your_cerebras_api_key_here"))
+        self.assertFalse(is_valid_api_key("gsk_xxxxxxxxxxxxxxxxxxxxxx"))
+        self.assertFalse(is_valid_api_key("change_me_to_a_real_key_please"))
+        self.assertTrue(is_valid_api_key("gsk_" + "a1B2c3D4" * 6"))
+
+    @patch("requests.post")
+    def test_client_error_flat_60s_cooldown(self, mock_post):
+        """Other 4xx errors get a flat 60s cooldown (no exponential doubling)."""
+        resp_422 = MagicMock()
+        resp_422.status_code = 422
+        resp_422.text = '{"error": {"message": "unprocessable entity parameters"}}'
+        mock_post.return_value = resp_422
+
+        before = time.time()
+        with self.assertRaises(Exception):
+            call_chat_completions("groq", messages=[{"role": "user", "content": "hi"}])
+
+        state = registry.get_state("groq")
+        self.assertTrue(55 <= (state.cooldown_until - before) <= 65)
+
+    @patch("requests.post")
+    def test_startup_check_never_raises(self, mock_post):
+        """Live check handles 404, 401, 200, exceptions without ever raising."""
+        # 1. 200 OK
+        resp_200 = MagicMock()
+        resp_200.status_code = 200
+        resp_200.json.return_value = {"choices": [{"message": {"content": "OK"}}]}
+        mock_post.return_value = resp_200
+        status, model, latency = run_live_check("groq")
+        self.assertEqual(status, "ok")
+        self.assertTrue(latency >= 0.0)
+
+        # 2. 401 Auth error
+        resp_401 = MagicMock()
+        resp_401.status_code = 401
+        resp_401.text = "unauthorized"
+        mock_post.return_value = resp_401
+        mock_post.side_effect = None
+        status, model, _ = run_live_check("gemini")
+        self.assertEqual(status, "bad key")
+
+        # 3. Connection error (reset state first so it is not cached as disabled)
+        with registry._lock:
+            registry._states.clear()
+        mock_post.side_effect = requests.RequestException("DNS fail")
+        status, model, _ = run_live_check("gemini")
+        self.assertEqual(status, "down")
+
+
+class TestUnsupportedAndHelpFallback(LLMBaseTestCase):
+    @patch("app.llm.router.call_chat_completions")
+    def test_unsupported_requests_all_languages_no_strikes(self, mock_call):
+        """Unsupported requests (grades, marks, fees, timetable) in English, Urdu, Sindhi, Roman return info with 0 strikes."""
+        mock_call.return_value = '{"lang": "en", "actions": [], "clarify": null, "off_topic": false, "unsupported": true}'
+        chat_id = "student_grades@c.us"
+        usr.upsert_user(chat_id, email="sg@test.com", status="active")
+        lms = FakeLMSClient("sg@test.com")
+        usr.set_client(chat_id, lms)
+
+        # 1. English
+        self.sent_texts.clear()
+        wa_bot.handle(chat_id, "Show my grade in NLP")
+        self.assertFalse(usr.is_llm_locked(chat_id))
+        self.assertTrue(any("I can't do that yet" in txt for _, txt in self.sent_texts))
+
+        # 2. Roman Urdu (offline rules or mock)
+        self.sent_texts.clear()
+        mock_call.return_value = '{"lang": "ur", "actions": [], "clarify": null, "off_topic": false, "unsupported": true}'
+        wa_bot.handle(chat_id, "mera NLP ka grade batao")
+        self.assertFalse(usr.is_llm_locked(chat_id))
+        self.assertTrue(any("میں ابھی یہ نہیں کر سکتا" in txt or "I can't do that yet" in txt for _, txt in self.sent_texts))
+
+        # 3. Urdu script
+        self.sent_texts.clear()
+        mock_call.return_value = '{"lang": "ur", "actions": [], "clarify": null, "off_topic": false, "unsupported": true}'
+        wa_bot.handle(chat_id, "میرا این ایل پی کا گریڈ دکھاؤ")
+        self.assertFalse(usr.is_llm_locked(chat_id))
+        self.assertTrue(any("میں ابھی یہ نہیں کر سکتا" in txt for _, txt in self.sent_texts))
+
+        # 4. Sindhi script
+        self.sent_texts.clear()
+        mock_call.return_value = '{"lang": "sd", "actions": [], "clarify": null, "off_topic": false, "unsupported": true}'
+        wa_bot.handle(chat_id, "منهنجو NLP جو گريڊ ڏيکاريو")
+        self.assertFalse(usr.is_llm_locked(chat_id))
+        self.assertTrue(any("مان اڃا اهو نٿو ڪري سگهان" in txt for _, txt in self.sent_texts))
+
+    @patch("app.llm.router.call_chat_completions")
+    def test_unsupported_rescued_from_off_topic_no_strikes(self, mock_call):
+        """Even if model flags 'Show my grade in NLP' as off_topic, rules rescue it to unsupported with 0 strikes."""
+        mock_call.return_value = '{"lang": "en", "actions": [], "clarify": null, "off_topic": true, "unsupported": false}'
+        chat_id = "grade_rescue@c.us"
+        usr.upsert_user(chat_id, email="gr@test.com", status="active")
+        lms = FakeLMSClient("gr@test.com")
+        usr.set_client(chat_id, lms)
+
+        wa_bot.handle(chat_id, "Show my grade in NLP")
+        self.assertFalse(usr.is_llm_locked(chat_id))
+        self.assertTrue(any("I can't do that yet" in txt for _, txt in self.sent_texts))
+
+    def test_not_understood_and_busy_throttled_2_minutes(self):
+        """Unrecognized message gets not_understood/busy and is throttled to once per 2 minutes."""
+        chat_id = "throttle_user@c.us"
+        usr.upsert_user(chat_id, email="tu@test.com", status="active")
+        lms = FakeLMSClient("tu@test.com")
+        usr.set_client(chat_id, lms)
+
+        # When all providers are failing/disabled
+        registry.get_state("gemini").disabled = True
+        registry.get_state("groq").disabled = True
+
+        # First unrecognized message: sends busy
+        wa_bot.handle(chat_id, "blablabla completely unknown gibberish")
+        self.assertEqual(len(self.sent_texts), 1)
+        self.assertIn("busy", self.sent_texts[0][1].lower())
+
+        # Second unrecognized message 10 seconds later: throttled (silent)
+        self.sent_texts.clear()
+        wa_bot.handle(chat_id, "blablabla another attempt")
+        self.assertEqual(len(self.sent_texts), 0)
+
+        # After 121 seconds: allowed again
+        self.sent_texts.clear()
+        wa_bot._user_help_sent[chat_id] = time.time() - 125
+        wa_bot.handle(chat_id, "blablabla third attempt")
+        self.assertEqual(len(self.sent_texts), 1)
+
+    def test_prompt_token_budget_under_900_tokens(self):
+        """System prompt with 8 few-shot examples is well under 900 tokens."""
+        prompt = build_system_prompt(user_text="What is my attendance?", has_pending_download=False, lang="en")
+        est_tokens = len(prompt) / 3.8
+        self.assertLess(est_tokens, 900)
 
 
 if __name__ == "__main__":

@@ -10,14 +10,30 @@ from typing import Optional
 
 try:
     from .intent import build_system_prompt, build_user_payload, validate_intent_response
-    from .providers import AuthError, RateLimitError, ServerOrNetworkError, call_chat_completions, registry
+    from .providers import (
+        AuthError,
+        BadModelError,
+        ClientError,
+        RateLimitError,
+        ServerOrNetworkError,
+        call_chat_completions,
+        registry,
+    )
 except ImportError:
     from llm.intent import build_system_prompt, build_user_payload, validate_intent_response
-    from llm.providers import AuthError, RateLimitError, ServerOrNetworkError, call_chat_completions, registry
+    from llm.providers import (
+        AuthError,
+        BadModelError,
+        ClientError,
+        RateLimitError,
+        ServerOrNetworkError,
+        call_chat_completions,
+        registry,
+    )
 
 log = logging.getLogger("taleemgo.llm.router")
 
-DEFAULT_PROVIDERS = "gemini,groq,openrouter,cerebras"
+DEFAULT_PROVIDERS = "gemini,groq"
 TOTAL_TIME_BUDGET = 12.0
 PER_REQUEST_TIMEOUT = 6.0
 
@@ -61,7 +77,11 @@ def route_intent(
     providers = get_configured_providers()
     deadline = time.time() + TOTAL_TIME_BUDGET
 
-    system_prompt = build_system_prompt()
+    system_prompt = build_system_prompt(
+        user_text=sanitized_text,
+        has_pending_download=has_pending_download,
+        lang=stored_lang,
+    )
     user_payload = build_user_payload(
         sanitized_text,
         has_pending_download=has_pending_download,
@@ -100,13 +120,14 @@ def route_intent(
                     json_mode=True,
                     timeout=req_timeout,
                     temperature=0.0,
-                    max_tokens=200,
+                    max_tokens=800,
                 )
                 latency = time.time() - start_t
 
                 parsed = _extract_json_block(raw_output)
                 validated = validate_intent_response(parsed, has_pending_download=has_pending_download)
-                log.info("LLM success provider=%s latency=%.2fs off_topic=%s", prov, latency, validated.get("off_topic"))
+                log.info("LLM success provider=%s latency=%.2fs off_topic=%s unsupported=%s",
+                         prov, latency, validated.get("off_topic"), validated.get("unsupported"))
                 return validated
 
             except (json.JSONDecodeError, ValueError) as err:
@@ -117,6 +138,12 @@ def route_intent(
                 else:
                     registry.record_5xx_or_network(prov, "InvalidSchema")
                     break
+            except BadModelError as err:
+                log.warning("Provider %s bad model error: %s", prov, err)
+                break
+            except ClientError as err:
+                log.warning("Provider %s client error: %s", prov, err)
+                break
             except RateLimitError as err:
                 log.warning("Provider %s rate limit: %s", prov, err)
                 registry.record_429(prov, getattr(err, "retry_after", None))

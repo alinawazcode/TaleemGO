@@ -37,8 +37,13 @@ try:
     )
     from app.llm.i18n import t
     from app.llm.intent import add_user_history, get_user_history
-    from app.llm.providers import registry
-    from app.llm.router import is_llm_enabled, route_intent
+    from app.llm.providers import (
+        PROVIDER_CONFIGS,
+        is_valid_api_key,
+        registry,
+        run_live_check,
+    )
+    from app.llm.router import get_configured_providers, is_llm_enabled, route_intent
     from app.llm.rules import match_rules
 except ImportError:
     from llm.lang_data import (
@@ -49,8 +54,13 @@ except ImportError:
     )
     from llm.i18n import t
     from llm.intent import add_user_history, get_user_history
-    from llm.providers import registry
-    from llm.router import is_llm_enabled, route_intent
+    from llm.providers import (
+        PROVIDER_CONFIGS,
+        is_valid_api_key,
+        registry,
+        run_live_check,
+    )
+    from llm.router import get_configured_providers, is_llm_enabled, route_intent
     from llm.rules import match_rules
 
 log = logging.getLogger("taleemgo.wa")
@@ -106,6 +116,28 @@ def _start_monitor():
     sched.start()
     api.state.sched = sched
     log.info("Monitor scheduled every %d min; stale cleanup every 2 min", minutes)
+
+    def _startup_llm_check():
+        if not is_llm_enabled():
+            return
+        time.sleep(1.0)
+        try:
+            for prov in get_configured_providers():
+                cfg = PROVIDER_CONFIGS.get(prov)
+                if not cfg:
+                    continue
+                raw_key = os.environ.get(cfg["env_key"], "")
+                if not is_valid_api_key(raw_key):
+                    continue
+                status, model_id, latency = run_live_check(prov)
+                if status == "ok":
+                    log.info("[LLM] %s OK model=%s %dms", prov, model_id, int(latency))
+                else:
+                    log.warning("[LLM] %s FAILED %s model=%s", prov, status, model_id)
+        except Exception as e:
+            log.warning("Startup LLM live check error: %s", e)
+
+    threading.Thread(target=_startup_llm_check, daemon=True).start()
 
 
 # ---- helpers ----
@@ -539,10 +571,23 @@ def _handle_cmd_llm(chat_id: str):
     lines = ["TaleemGo AI LLM Status:"]
     for prov, data in summary.items():
         status = data["status"]
+        model = data.get("model", "")
         calls = data["calls_today"]
         last_err = data["last_error"]
-        lines.append(f"- {prov}: {status} | calls today: {calls} | last error: {last_err}")
+        lines.append(f"- {prov}: {status} (model: {model}) | calls today: {calls} | last error: {last_err}")
     lines.append(f"\nLocked users: {locked_count} locked")
+    _reply(chat_id, "\n".join(lines))
+
+
+def _handle_cmd_llm_test(chat_id: str):
+    providers = get_configured_providers()
+    lines = ["TaleemGo AI LLM Test:"]
+    for prov in providers:
+        status, model_id, latency = run_live_check(prov)
+        if status == "ok":
+            lines.append(f"- {prov}: ok ({model_id}, {int(latency)}ms)")
+        else:
+            lines.append(f"- {prov}: {status} ({model_id})")
     _reply(chat_id, "\n".join(lines))
 
 
@@ -607,7 +652,11 @@ def _handle_locked(chat_id: str, text: str, is_self: bool = False):
         return
     if word == "llm":
         if user.get("is_admin"):
-            _handle_cmd_llm(chat_id)
+            parts = text_stripped.split()
+            if len(parts) > 1 and parts[1].lower() == "test":
+                _handle_cmd_llm_test(chat_id)
+            else:
+                _handle_cmd_llm(chat_id)
         return
 
     if status == "awaiting_email":
@@ -670,17 +719,32 @@ def _handle_awaiting_password(chat_id: str, user: dict, text: str):
     _reply(chat_id, f"✅ Connected as {email}\n\n{HELP}")
 
 
-_user_busy_sent: dict = {}
-_busy_lock = threading.Lock()
+_user_help_sent: dict = {}
+_help_lock = threading.Lock()
 
 
-def _maybe_send_busy(chat_id: str, lang: str):
+def _are_all_providers_failing() -> bool:
+    """Returns True only when providers are configured with valid keys but all are failing/in cooldown."""
+    providers = get_configured_providers()
+    has_valid_key = False
+    for prov in providers:
+        cfg = PROVIDER_CONFIGS.get(prov)
+        if cfg and is_valid_api_key(os.environ.get(cfg["env_key"], "")):
+            has_valid_key = True
+            if registry.is_available(prov):
+                return False
+    return has_valid_key
+
+
+def _maybe_send_help_fallback(chat_id: str, lang: str, is_busy: bool = False):
     now = time.time()
-    with _busy_lock:
-        last = _user_busy_sent.get(chat_id, 0.0)
-        if now - last >= 600:
-            _user_busy_sent[chat_id] = now
-            _reply(chat_id, t("busy", lang, help=t("help", lang)))
+    interval_sec = int(os.environ.get("LLM_HELP_REPLY_INTERVAL_MIN", "2")) * 60
+    with _help_lock:
+        last = _user_help_sent.get(chat_id, 0.0)
+        if now - last >= interval_sec:
+            _user_help_sent[chat_id] = now
+            key = "busy" if is_busy else "not_understood"
+            _reply(chat_id, t(key, lang, help=t("help", lang)))
 
 
 def _dispatch_exact_cmd(chat_id: str, lms, word: str, arg: str):
@@ -839,27 +903,22 @@ def _handle_natural_language(chat_id: str, text: str, user: dict, lms):
 
     if use_rules:
         rule_res = match_rules(clean_text, has_pending_download=has_pending, stored_lang=stored_lang)
-        if rule_res and rule_res.get("actions"):
+        if rule_res and rule_res.get("unsupported"):
+            resp_lang = rule_res.get("lang", stored_lang)
+            if resp_lang != user.get("lang"):
+                usr.upsert_user(chat_id, lang=resp_lang)
+                user["lang"] = resp_lang
+            effective_lang = user.get("lang", "en")
+            _reply(chat_id, t("unsupported", effective_lang, help=t("help", effective_lang)))
+            return
+        elif rule_res and rule_res.get("actions"):
             parsed = rule_res
         else:
             if not is_llm_enabled():
                 _reply(chat_id, HELP)
             else:
-                _maybe_send_busy(chat_id, stored_lang)
-            return
-
-    # Check off-topic from model
-    if parsed.get("off_topic"):
-        # Rescue check with rule matcher (Part S.7)
-        rule_res = match_rules(clean_text, has_pending_download=has_pending, stored_lang=stored_lang)
-        if rule_res and not rule_res.get("off_topic") and rule_res.get("actions"):
-            parsed = rule_res
-        else:
-            just_locked = usr.record_strike(chat_id, strikes=1, is_admin=is_admin)
-            if just_locked and int(os.environ.get("LLM_NOTIFY_ON_LOCK", "1")):
-                lang = user.get("lang", "en")
-                hours = int(os.environ.get("LLM_LOCK_HOURS", "2"))
-                _reply(chat_id, t("lock_notice", lang, hours=hours, help=t("help", lang)))
+                is_busy = _are_all_providers_failing()
+                _maybe_send_help_fallback(chat_id, stored_lang, is_busy=is_busy)
             return
 
     # Language tag update
@@ -868,6 +927,31 @@ def _handle_natural_language(chat_id: str, text: str, user: dict, lms):
         usr.upsert_user(chat_id, lang=resp_lang)
         user["lang"] = resp_lang
     effective_lang = user.get("lang", "en")
+
+    # Check unsupported from model (grades, marks, timetable, fees, results)
+    if parsed.get("unsupported"):
+        _reply(chat_id, t("unsupported", effective_lang, help=t("help", effective_lang)))
+        return
+
+    # Check off-topic from model
+    if parsed.get("off_topic"):
+        # Rescue check with rule matcher (Part S.7 & unsupported keywords)
+        rule_res = match_rules(clean_text, has_pending_download=has_pending, stored_lang=stored_lang)
+        if rule_res:
+            if rule_res.get("unsupported"):
+                rule_lang = rule_res.get("lang", effective_lang)
+                _reply(chat_id, t("unsupported", rule_lang, help=t("help", rule_lang)))
+                return
+            elif not rule_res.get("off_topic") and rule_res.get("actions"):
+                parsed = rule_res
+
+        if parsed.get("off_topic"):
+            just_locked = usr.record_strike(chat_id, strikes=1, is_admin=is_admin)
+            if just_locked and int(os.environ.get("LLM_NOTIFY_ON_LOCK", "1")):
+                lang = user.get("lang", "en")
+                hours = int(os.environ.get("LLM_LOCK_HOURS", "2"))
+                _reply(chat_id, t("lock_notice", lang, hours=hours, help=t("help", lang)))
+            return
 
     add_user_history(chat_id, clean_text)
 

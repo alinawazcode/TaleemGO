@@ -5,9 +5,9 @@ import re
 from typing import Optional
 
 try:
-    from .lang_data import KEYWORDS, SINDHI_ORDINALS, convert_to_ascii_digits, fold_arabic_script
+    from .lang_data import KEYWORDS, SINDHI_ORDINALS, UNSUPPORTED_KEYWORDS, convert_to_ascii_digits, fold_arabic_script
 except ImportError:
-    from llm.lang_data import KEYWORDS, SINDHI_ORDINALS, convert_to_ascii_digits, fold_arabic_script
+    from llm.lang_data import KEYWORDS, SINDHI_ORDINALS, UNSUPPORTED_KEYWORDS, convert_to_ascii_digits, fold_arabic_script
 
 WEEK_DIGIT_RE = re.compile(r"\b(?:week|wk|w|lecture|lec|l|hafta|hafto|hafte|هفتو|هفتي|ہفتہ|ہفتے|لیکچر|ليڪچر)\s*(\d+)\b", re.IGNORECASE)
 
@@ -98,18 +98,40 @@ def match_rules(text: str, has_pending_download: bool = False, stored_lang: str 
     if has_pending_download:
         tl = clean_text.lower()
         if tl == "cancel":
-            return {"lang": lang, "actions": [{"intent": "choose", "cancel": True}], "clarify": None, "off_topic": False}
+            return {"lang": lang, "actions": [{"intent": "choose", "cancel": True}], "clarify": None, "off_topic": False, "unsupported": False}
         if tl == "all":
-            return {"lang": lang, "actions": [{"intent": "choose", "all": True}], "clarify": None, "off_topic": False}
+            return {"lang": lang, "actions": [{"intent": "choose", "all": True}], "clarify": None, "off_topic": False, "unsupported": False}
         tokens = [x for x in re.split(r"[\s,]+", clean_text) if x]
         if tokens and all(x.isdigit() for x in tokens):
             nums = [int(x) for x in tokens if 1 <= int(x) <= 20]
             if nums:
-                return {"lang": lang, "actions": [{"intent": "choose", "numbers": nums}], "clarify": None, "off_topic": False}
+                return {"lang": lang, "actions": [{"intent": "choose", "numbers": nums}], "clarify": None, "off_topic": False, "unsupported": False}
 
     folded = fold_arabic_script(clean_text)
     folded_lower = folded.lower()
     norm_lower = clean_text.lower()
+
+    # 1b. Check for unsupported university/LMS requests (grades, marks, timetable, fees, etc.)
+    def has_keyword(kw_list):
+        for kw in kw_list:
+            folded_kw = fold_arabic_script(kw).lower()
+            if folded_kw in folded_lower or kw.lower() in norm_lower:
+                return True
+            # Edit distance 1 for Roman Sindhi / Roman Urdu keywords of 5+ letters
+            if len(kw) >= 5 and re.match(r"^[a-z]+$", kw.lower()):
+                for word in re.findall(r"[a-z]+", norm_lower):
+                    if len(word) >= 5 and _edit_distance_1(word, kw.lower()):
+                        return True
+        return False
+
+    if has_keyword(UNSUPPORTED_KEYWORDS):
+        return {
+            "lang": lang,
+            "actions": [],
+            "clarify": None,
+            "off_topic": False,
+            "unsupported": True,
+        }
 
     # 2. Extract week/lecture number
     week_num = None
@@ -131,24 +153,17 @@ def match_rules(text: str, has_pending_download: bool = False, stored_lang: str 
     # 3. Match Intent Keywords
     matched_intent = None
 
-    def has_keyword(kw_list):
-        for kw in kw_list:
-            folded_kw = fold_arabic_script(kw).lower()
-            if folded_kw in folded_lower or kw.lower() in norm_lower:
-                return True
-            # Edit distance 1 for Roman Sindhi / Roman Urdu keywords of 5+ letters
-            if len(kw) >= 5 and re.match(r"^[a-z]+$", kw.lower()):
-                for word in re.findall(r"[a-z]+", norm_lower):
-                    if len(word) >= 5 and _edit_distance_1(word, kw.lower()):
-                        return True
-        return False
+    has_explicit_week = (m_week is not None) or any(
+        w in norm_lower or w in folded_lower
+        for w in ("week", "wk", "hafta", "hafto", "hafte", "هفتو", "هفتي", "ہفتہ", "ہفتے", "lecture", "lec", "ليڪچر", "لیکچر")
+    )
 
     if has_keyword(KEYWORDS["attendance"]):
         matched_intent = "attendance"
     elif has_keyword(KEYWORDS["clos"]):
         matched_intent = "clos"
-    elif week_num is not None or has_keyword(KEYWORDS["files"]):
-        # Week number mentioned or file/download word -> download intent
+    elif (week_num is not None and has_explicit_week) or has_keyword(KEYWORDS["files"]):
+        # Week number with week word or file/download word -> download intent
         matched_intent = "download"
     elif has_keyword(KEYWORDS["upcoming"]):
         matched_intent = "upcoming"
@@ -210,4 +225,5 @@ def match_rules(text: str, has_pending_download: bool = False, stored_lang: str 
         "actions": [action],
         "clarify": None,
         "off_topic": False,
+        "unsupported": False,
     }
