@@ -16,10 +16,14 @@ const DEBUG_SELF = process.env.DEBUG_SELF === "1";
 
 let client = null;
 let ready = false;
+// Own LID (e.g. 1234567890@lid). Self-chat messages are addressed to it. Optional manual override: ADMIN_LID in .env.
+let ownLid = (process.env.ADMIN_LID || "").trim() || null;
+if (ownLid && !ownLid.includes("@")) ownLid += "@lid";
 
 async function isSelfChat(msg, c = client) {
   if (!msg || !msg.fromMe) return false;
   if (msg.to && msg.from && msg.to === msg.from) return true;
+  if (ownLid && msg.to === ownLid) return true;
 
   const wid = c?.info?.wid?._serialized || (typeof c?.info?.wid === "string" ? c.info.wid : null);
   if (wid && msg.to === wid) return true;
@@ -76,6 +80,37 @@ async function sendMediaRobust(chat_id, media, caption) {
   throw last;
 }
 
+// Find the bridge account's own LID so the "message yourself" chat can be recognised.
+async function learnOwnLid() {
+  if (ownLid) return;
+  const ser = (v) => (!v ? null : typeof v === "string" ? v : v._serialized || null);
+  const wid = ser(client?.info?.wid);
+  try {
+    if (wid && typeof client.getContactLidAndPhone === "function") {
+      const r = await client.getContactLidAndPhone([wid]);
+      const lid = ser(r && r[0] && r[0].lid);
+      if (lid && lid.endsWith("@lid")) ownLid = lid;
+    }
+  } catch (e) {
+    console.log("[SELF] getContactLidAndPhone failed:", e.message);
+  }
+  if (!ownLid) {
+    try {
+      const lid = await client.pupPage.evaluate(() => {
+        try {
+          const u = window.Store.User;
+          const l = u.getMaybeMeLidUser ? u.getMaybeMeLidUser() : null;
+          return l ? l._serialized : null;
+        } catch (e) { return null; }
+      });
+      if (lid && lid.endsWith("@lid")) ownLid = lid;
+    } catch (e) { /* ignore */ }
+  }
+  console.log(ownLid
+    ? `[SELF] own LID known (...${ownLid.slice(-6)})`
+    : "[SELF] own LID not found. Set DEBUG_SELF=1, send yourself a message, copy the full to= value into ADMIN_LID in .env");
+}
+
 // Windows: a hard-stopped bridge often leaves its hidden Chrome running, which locks the saved
 // WhatsApp session and makes the next start hang. Kill only Chrome processes that use our session folder.
 function killStaleChrome() {
@@ -114,6 +149,7 @@ if (require.main === module) {
     const wid = client.info?.wid?._serialized || null;
     const lid = client.info?.lid?._serialized || (typeof client.info?.lid === "string" ? client.info.lid : null);
     console.log(`WhatsApp ready. Own WID: ${wid}, LID: ${lid}`);
+    learnOwnLid().catch((e) => console.log("[SELF] lookup error:", e.message));
   });
 
   client.on("disconnected", (r) => {
@@ -132,6 +168,11 @@ if (require.main === module) {
       if (!msg.fromMe) {
         // Normal incoming message from another person
         chat_id = msg.from;
+        // An incoming 1:1 message is addressed to us: remember our own LID if we still don't know it
+        if (!ownLid && msg.to && msg.to.endsWith("@lid")) {
+          ownLid = msg.to;
+          console.log(`[SELF] learned own LID from an incoming message (...${ownLid.slice(-6)})`);
+        }
       } else {
         is_self = await isSelfChat(msg, client);
         if (is_self) {
@@ -145,6 +186,7 @@ if (require.main === module) {
             const fromSuffix = (msg.from || "").slice(-6);
             const ownSuffix = (client?.info?.wid?._serialized || "").slice(-6);
             console.log(`[SELF-DEBUG] fromMe to-suffix=${toSuffix} from-suffix=${fromSuffix} own=${ownSuffix} matched=false`);
+            console.log(`[SELF-DEBUG] full to=${msg.to} (if this is your own chat, put it in .env as ADMIN_LID=${msg.to})`);
           }
           return;
         }
