@@ -44,7 +44,57 @@ async function isSelfChat(msg, c = client) {
   return false;
 }
 
+// Media sends to @lid chats can fail with
+// "Data passed to getter must include an id property". Try three ways, in order.
+async function sendMediaRobust(chat_id, media, caption) {
+  const base = { sendSeen: false, sendMediaAsDocument: true };
+  const attempts = [
+    // 1. normal send, without marking the chat as seen
+    () => client.sendMessage(chat_id, media, { ...base, caption }),
+    // 2. look the chat up first and send through it
+    async () => {
+      const chat = await client.getChatById(chat_id);
+      return chat.sendMessage(media, { ...base, caption });
+    },
+    // 3. last resort: file first, caption as a separate text message
+    async () => {
+      await client.sendMessage(chat_id, media, base);
+      if (caption) await client.sendMessage(chat_id, caption);
+    },
+  ];
+  let last;
+  for (let i = 0; i < attempts.length; i++) {
+    try {
+      await attempts[i]();
+      if (i > 0) console.log(`[SEND-FILE] worked with attempt ${i + 1}`);
+      return;
+    } catch (e) {
+      last = e;
+      console.error(`[SEND-FILE] attempt ${i + 1} failed: ${e.message}`);
+    }
+  }
+  throw last;
+}
+
+// Windows: a hard-stopped bridge often leaves its hidden Chrome running, which locks the saved
+// WhatsApp session and makes the next start hang. Kill only Chrome processes that use our session folder.
+function killStaleChrome() {
+  if (process.platform !== "win32") return;
+  try {
+    require("child_process").execFileSync("powershell", [
+      "-NoProfile", "-Command",
+      "Get-CimInstance Win32_Process -Filter \"Name='chrome.exe'\" | " +
+      "Where-Object { $_.CommandLine -like '*wwebjs_auth*' } | " +
+      "ForEach-Object { Stop-Process -Id $_.ProcessId -Force }",
+    ], { stdio: "ignore", timeout: 20000 });
+    console.log("[START] checked for leftover bridge Chrome processes");
+  } catch (e) {
+    console.log("[START] leftover-Chrome check skipped:", e.message);
+  }
+}
+
 if (require.main === module) {
+  killStaleChrome();
   client = new Client({
     authStrategy: new LocalAuth({ dataPath: "./.wwebjs_auth" }),
     puppeteer: {
@@ -149,10 +199,7 @@ if (require.main === module) {
     if (!chat_id) return res.status(400).json({ error: "chat_id required" });
     try {
       const media = MessageMedia.fromFilePath(filePath);
-      await client.sendMessage(chat_id, media, {
-        caption: "🤖 " + (caption || ""),
-        sendMediaAsDocument: true,
-      });
+      await sendMediaRobust(chat_id, media, "🤖 " + (caption || ""));
       res.json({ ok: true });
     } catch (e) {
       console.error("[SEND-FILE ERROR]", e.message);
@@ -166,7 +213,40 @@ if (require.main === module) {
     res.json({ ready, wid, lid });
   });
 
-  client.initialize();
+  // Progress logging, so a hang shows where it stops
+  client.on("loading_screen", (p, m) => console.log(`[LOADING] ${p}% ${m}`));
+  client.on("authenticated", () => console.log("[AUTH] authenticated"));
+  client.on("auth_failure", (m) => console.error("[AUTH FAILURE]", m));
+  client.on("change_state", (s) => console.log("[STATE]", s));
+
+  // Close Chrome properly on Ctrl+C so it is not left running
+  let shuttingDown = false;
+  async function shutdown(sig) {
+    if (shuttingDown) return;
+    shuttingDown = true;
+    console.log(`[STOP] ${sig}: closing WhatsApp...`);
+    try {
+      await Promise.race([client.destroy(), new Promise((r) => setTimeout(r, 8000))]);
+    } catch (e) { /* ignore */ }
+    process.exit(0);
+  }
+  process.on("SIGINT", () => shutdown("SIGINT"));
+  process.on("SIGTERM", () => shutdown("SIGTERM"));
+
+  // If WhatsApp is not ready in 2 minutes, say so and exit instead of hanging silently
+  const watchdog = setTimeout(() => {
+    if (!ready) {
+      console.error("[TIMEOUT] WhatsApp not ready after 120s. Close this window, then run npm start again. " +
+        "If it repeats, paste the [LOADING]/[AUTH]/[STATE] lines above.");
+      process.exit(1);
+    }
+  }, 120000);
+  client.on("ready", () => clearTimeout(watchdog));
+
+  client.initialize().catch((e) => {
+    console.error("[INIT ERROR]", e.message);
+    process.exit(1);
+  });
   app.listen(PORT, "127.0.0.1", () => console.log(`Bridge on 127.0.0.1:${PORT}`));
 }
 
