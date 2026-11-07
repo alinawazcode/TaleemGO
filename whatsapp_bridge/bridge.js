@@ -1,5 +1,6 @@
-// Sathi WhatsApp bridge (unofficial, whatsapp-web.js).
-// Python does all the thinking; this file only moves messages in and out.
+// Sathi WhatsApp bridge — multi-user version.
+// Forwards every incoming 1:1 message to Python with { chat_id, text }.
+// /send and /send-file accept { chat_id, text/path/caption } in the body.
 require("dotenv").config();
 const express = require("express");
 const qrcode = require("qrcode-terminal");
@@ -8,66 +9,77 @@ const { Client, LocalAuth, MessageMedia } = require("whatsapp-web.js");
 const PORT = parseInt(process.env.BRIDGE_PORT || "3001", 10);
 const PY_URL = process.env.PY_WEBHOOK || "http://127.0.0.1:8000/incoming";
 const TOKEN = process.env.BRIDGE_TOKEN || "";
-const ALLOWED = (process.env.WA_ALLOWED_NUMBER || "").replace(/\D/g, "");
-const PREFIX = "🤖 ";
-
-if (!ALLOWED) { console.error("Set WA_ALLOWED_NUMBER in .env"); process.exit(1); }
+const CHROME_PATH = process.env.CHROME_PATH || "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe";
+// Optional: owner's own number for self-chat testing (fromMe messages to self)
+const ADMIN_NUMBER = (process.env.ADMIN_NUMBER || "").replace(/\D/g, "");
 
 const client = new Client({
   authStrategy: new LocalAuth({ dataPath: "./.wwebjs_auth" }),
   puppeteer: {
     headless: true,
-    executablePath: process.env.CHROME_PATH || "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",
+    executablePath: CHROME_PATH,
     args: ["--no-sandbox", "--disable-setuid-sandbox"],
   },
 });
 
 let ready = false;
-let targetChatId = null; // full serialized ID e.g. 263939246014664@lid or @c.us
 
-client.on("qr", (qr) => { console.log("Scan QR with WhatsApp > Linked devices:"); qrcode.generate(qr, { small: true }); });
+client.on("qr", (qr) => {
+  console.log("Scan QR with WhatsApp > Linked devices:");
+  qrcode.generate(qr, { small: true });
+});
 client.on("ready", () => { ready = true; console.log("WhatsApp ready"); });
 client.on("disconnected", (r) => { ready = false; console.error("Disconnected:", r); });
 
 client.on("message_create", async (msg) => {
   try {
-    // Full serialized chat ID — may be @c.us or @lid for self-chat
-    const chatId = msg.fromMe ? msg.to : msg.from;
-    const num = chatId ? chatId.split("@")[0] : "";
+    // Skip groups and status broadcasts
+    if (!msg.from || msg.from.endsWith("@g.us") || msg.from === "status@broadcast") return;
 
-    console.log(`[MSG] fromMe=${msg.fromMe} num=${num} chatId=${chatId} body="${(msg.body || "").slice(0, 40)}"`);
+    let chat_id = null;
 
-    if (!chatId || chatId.endsWith("@g.us")) return;           // ignore groups
-    if (num !== ALLOWED) { console.log(`[SKIP] num mismatch`); return; }
-    if (msg.fromMe && (msg.body || "").startsWith(PREFIX.trim())) return; // own bot replies
-    if (!msg.body) return;
-
-    // Capture the exact chat ID (preserving @lid / @c.us) from first real message
-    if (!targetChatId) {
-      targetChatId = chatId;
-      console.log(`[INIT] targetChatId locked to: ${targetChatId}`);
+    if (!msg.fromMe) {
+      // Normal incoming message from another person
+      chat_id = msg.from;
+    } else if (ADMIN_NUMBER && msg.to && msg.to.split("@")[0] === ADMIN_NUMBER) {
+      // Owner messaging themselves (self-chat) for testing
+      chat_id = msg.to;
+    } else {
+      // Outgoing message to someone else — ignore
+      return;
     }
 
-    console.log(`[FWD] -> Python: "${msg.body.slice(0, 40)}"`);
+    if (!msg.body) return;
+
+    // Log only suffix and length — never the content
+    const suffix = chat_id.slice(-6);
+    console.log(`[MSG] ...${suffix} len=${msg.body.length}`);
+
     const resp = await fetch(PY_URL, {
       method: "POST",
       headers: { "Content-Type": "application/json", "x-token": TOKEN },
-      body: JSON.stringify({ text: msg.body }),
+      body: JSON.stringify({ chat_id, text: msg.body }),
     });
-    console.log(`[FWD] Python responded: ${resp.status}`);
-  } catch (e) { console.error("forward failed:", e.message); }
+    if (!resp.ok) {
+      console.error(`[FWD] Python error ${resp.status} for ...${suffix}`);
+    }
+  } catch (e) {
+    console.error("forward failed:", e.message);
+  }
 });
 
 const app = express();
 app.use(express.json({ limit: "1mb" }));
-app.use((req, res, next) => (req.get("x-token") === TOKEN ? next() : res.status(401).json({ error: "bad token" })));
+app.use((req, res, next) =>
+  req.get("x-token") === TOKEN ? next() : res.status(401).json({ error: "bad token" })
+);
 
 app.post("/send", async (req, res) => {
   if (!ready) return res.status(503).json({ error: "not ready" });
-  if (!targetChatId) return res.status(503).json({ error: "no message received yet — send a message first to initialise the chat" });
+  const { chat_id, text } = req.body;
+  if (!chat_id) return res.status(400).json({ error: "chat_id required" });
   try {
-    console.log(`[SEND] -> ${targetChatId}: "${(req.body.text || "").slice(0, 40)}"`);
-    await client.sendMessage(targetChatId, PREFIX + req.body.text);
+    await client.sendMessage(chat_id, "🤖 " + text);
     res.json({ ok: true });
   } catch (e) {
     console.error("[SEND ERROR]", e.message);
@@ -77,10 +89,14 @@ app.post("/send", async (req, res) => {
 
 app.post("/send-file", async (req, res) => {
   if (!ready) return res.status(503).json({ error: "not ready" });
-  if (!targetChatId) return res.status(503).json({ error: "no message received yet" });
+  const { chat_id, path: filePath, caption } = req.body;
+  if (!chat_id) return res.status(400).json({ error: "chat_id required" });
   try {
-    const media = MessageMedia.fromFilePath(req.body.path);
-    await client.sendMessage(targetChatId, media, { caption: PREFIX + (req.body.caption || ""), sendMediaAsDocument: true });
+    const media = MessageMedia.fromFilePath(filePath);
+    await client.sendMessage(chat_id, media, {
+      caption: "🤖 " + (caption || ""),
+      sendMediaAsDocument: true,
+    });
     res.json({ ok: true });
   } catch (e) {
     console.error("[SEND-FILE ERROR]", e.message);
@@ -88,7 +104,7 @@ app.post("/send-file", async (req, res) => {
   }
 });
 
-app.get("/health", (_req, res) => res.json({ ready, targetChatId }));
+app.get("/health", (_req, res) => res.json({ ready }));
 
 client.initialize();
 app.listen(PORT, "127.0.0.1", () => console.log(`Bridge on 127.0.0.1:${PORT}`));

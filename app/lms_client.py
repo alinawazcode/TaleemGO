@@ -1,17 +1,12 @@
 """
-lms_client.py - Sathi LMS client (single student).
+lms_client.py - Sathi LMS client (multi-user capable).
 
-Does:
-  - login with email/password (only when no valid saved tokens exist)
-  - saves BOTH tokens to tokens.json after every login/refresh
-  - refreshes automatically 5 minutes before expiry, and retries once on 401
-  - get_courses / get_assignments / get_resources
-  - download_resource (uses the website cookie, the only method that works)
+LMSClient(email, password, token_file) for per-user instances.
+LMSClient()                             for the legacy Telegram bot (reads from .env).
 
-.env needs:
-  SUPABASE_URL, SUPABASE_ANON_KEY, LMS_EMAIL, LMS_PASSWORD, LMS_BASE_URL
-
-IMPORTANT: add tokens.json, downloads/ and .env to .gitignore.
+.env needs: SUPABASE_URL, SUPABASE_ANON_KEY, LMS_BASE_URL
+Optional:   LMS_EMAIL, LMS_PASSWORD (Telegram bot only)
+            SATHI_SECRET_KEY (Fernet key; auto-generated on first run if absent)
 """
 
 import base64
@@ -28,28 +23,22 @@ import requests
 import urllib3.util.connection as urllib3_cn
 from dotenv import load_dotenv
 
-# Force IPv4 for all `requests` calls (Supabase REST + LMS site). Same root
-# cause as the Telegram bot fix: the VPN needed here (Telegram is ISP-blocked
-# in Pakistan) doesn't tunnel IPv6, so IPv6 attempts hit the raw ISP block
-# and fail intermittently even though IPv4 works fine.
+# Force IPv4 (VPN in PK doesn't tunnel IPv6)
 def _allowed_gai_family():
     return socket.AF_INET
 
 urllib3_cn.allowed_gai_family = _allowed_gai_family
 
-# Resolve paths relative to the project root (one level above app/), not the
-# current working directory - this way it works whether you run
-# "python app/bot.py" from Saathi/ or "python bot.py" from inside app/.
 ROOT_DIR = Path(__file__).resolve().parent.parent
 DATA_DIR = ROOT_DIR / "data"
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 
 load_dotenv(ROOT_DIR / ".env")
 
-TOKEN_FILE = str(DATA_DIR / "tokens.json")
+TOKEN_FILE = str(DATA_DIR / "tokens.json")          # legacy path (Telegram bot)
 DEFAULT_DOWNLOAD_DIR = str(DATA_DIR / "downloads")
-REFRESH_MARGIN = 300            # refresh when < 5 minutes left
-MAX_DOWNLOAD_BYTES = 50 * 1024 * 1024   # Telegram bot upload limit is 50 MB
+REFRESH_MARGIN = 300
+MAX_DOWNLOAD_BYTES = 100 * 1024 * 1024              # 100 MB (WhatsApp doc limit)
 ALLOWED_EXTENSIONS = {".pdf", ".ppt", ".pptx", ".doc", ".docx", ".txt"}
 
 
@@ -57,23 +46,67 @@ class LMSError(Exception):
     pass
 
 
+class LMSAuthExpired(LMSError):
+    """Raised when the saved session is dead and no password is held."""
+    pass
+
+
+def _fernet():
+    """Return a Fernet instance, generating+saving SATHI_SECRET_KEY if missing."""
+    from cryptography.fernet import Fernet
+    key = os.environ.get("SATHI_SECRET_KEY", "")
+    if not key:
+        import logging
+        key = Fernet.generate_key().decode()
+        env_path = ROOT_DIR / ".env"
+        with open(env_path, "a", encoding="utf-8") as f:
+            f.write(f"\nSATHI_SECRET_KEY={key}\n")
+        os.environ["SATHI_SECRET_KEY"] = key
+        logging.getLogger("sathi.lms").warning(
+            "Generated new SATHI_SECRET_KEY and appended to .env — back it up!")
+    return Fernet(key.encode() if isinstance(key, str) else key)
+
+
 class LMSClient:
-    def __init__(self):
+    def __init__(self, email=None, password=None, token_file=None):
         self.supabase_url = os.environ["SUPABASE_URL"].rstrip("/")
         self.api_key = os.environ["SUPABASE_ANON_KEY"]
         self.lms_url = os.environ["LMS_BASE_URL"].rstrip("/")
-        self.email = os.environ["LMS_EMAIL"]
-        self.password = os.environ["LMS_PASSWORD"]
+
+        self.email = email or os.environ.get("LMS_EMAIL", "")
+        self._password = password or os.environ.get("LMS_PASSWORD", "")  # cleared after first successful store
+        self.token_file = token_file or TOKEN_FILE
 
         ref = urlparse(self.supabase_url).hostname.split(".")[0]
         self.cookie_name = f"sb-{ref}-auth-token"
         self.cookie_domain = urlparse(self.lms_url).hostname
 
         self.session_data = None
-        self.web = requests.Session()           # used for website downloads
+        self.web = requests.Session()
         self.web.headers["User-Agent"] = "Mozilla/5.0"
 
         self._load_tokens()
+
+    # ---------- encryption helpers ----------
+
+    @property
+    def _encrypted(self):
+        return self.token_file.endswith(".enc")
+
+    def _read_token_bytes(self):
+        with open(self.token_file, "rb") as f:
+            data = f.read()
+        if self._encrypted:
+            return _fernet().decrypt(data)
+        return data
+
+    def _write_token_bytes(self, data: bytes):
+        if self._encrypted:
+            data = _fernet().encrypt(data)
+        tmp = self.token_file + ".tmp"
+        with open(tmp, "wb") as f:
+            f.write(data)
+        os.replace(tmp, self.token_file)
 
     # ---------- token handling ----------
 
@@ -87,17 +120,16 @@ class LMSClient:
         return self.session_data["user"]["id"]
 
     def _store(self, data):
-        """Remember a new session, save to disk, rebuild the website cookie."""
+        """Remember session, save to disk (encrypted if .enc), set web cookie."""
         if "expires_at" not in data:
             data["expires_at"] = int(time.time()) + int(data.get("expires_in", 3600))
         self.session_data = data
-
-        tmp = TOKEN_FILE + ".tmp"
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(data, f)
-        os.replace(tmp, TOKEN_FILE)             # safe write, never half-written
+        # Do NOT persist the password — discard it after first successful login
+        self._password = None
 
         raw = json.dumps(data, separators=(",", ":")).encode("utf-8")
+        self._write_token_bytes(raw)
+
         encoded = base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
         self.web.cookies.set(
             self.cookie_name, "base64-" + encoded,
@@ -105,12 +137,14 @@ class LMSClient:
         )
 
     def _load_tokens(self):
-        if not os.path.exists(TOKEN_FILE):
+        if not os.path.exists(self.token_file):
             return
         try:
-            with open(TOKEN_FILE, encoding="utf-8") as f:
-                self._store(json.load(f))
-        except (OSError, ValueError, KeyError):
+            raw = self._read_token_bytes()
+            self._store(json.loads(raw))
+            # _store clears _password — restore it if we still need it (first login hasn't happened)
+            # Actually _store is only called here with existing token data; password already not needed.
+        except Exception:
             self.session_data = None
 
     def _auth_call(self, grant, body):
@@ -125,8 +159,10 @@ class LMSClient:
         return r.json()
 
     def login(self):
+        if not self._password:
+            raise LMSAuthExpired("No password held — session expired. Send `login` to re-authenticate.")
         self._store(self._auth_call(
-            "password", {"email": self.email, "password": self.password}))
+            "password", {"email": self.email, "password": self._password}))
 
     def refresh(self):
         data = self._auth_call(
@@ -135,15 +171,23 @@ class LMSClient:
         self._store(data)
 
     def ensure_session(self):
-        """Call before every request. Logs in or refreshes only if needed."""
+        """Call before every request. Refreshes if near expiry. Raises LMSAuthExpired if refresh fails and no password."""
         if not self.session_data:
-            self.login()
-            return
+            if self._password:
+                self.login()
+                return
+            raise LMSAuthExpired("No session and no password.")
         if self.session_data["expires_at"] - time.time() < REFRESH_MARGIN:
             try:
                 self.refresh()
-            except requests.HTTPError:
-                self.login()                    # saved refresh token was dead
+            except requests.HTTPError as e:
+                if e.response is not None and e.response.status_code in (400, 401):
+                    if self._password:
+                        self.login()
+                    else:
+                        raise LMSAuthExpired("Refresh token expired.") from e
+                else:
+                    raise
 
     # ---------- data (REST) ----------
 
@@ -160,8 +204,14 @@ class LMSClient:
             if r.status_code == 401 and attempt == 1:
                 try:
                     self.refresh()
-                except requests.HTTPError:
-                    self.login()
+                except requests.HTTPError as e:
+                    if e.response is not None and e.response.status_code in (400, 401):
+                        if self._password:
+                            self.login()
+                        else:
+                            raise LMSAuthExpired("Session dead; re-authenticate.") from e
+                    else:
+                        raise
                 continue
             r.raise_for_status()
             return r.json()
@@ -187,13 +237,7 @@ class LMSClient:
         return self._get("resources", **params)
 
     def get_attendance(self):
-        """
-        Returns {"overall": {...}, "courses": {course_id: {...}}}.
-        Each summary: present, absent, other, total, percent (None if no sessions).
-        NOTE: never select qr_token from attendance_sessions.
-        """
-        sessions = self._get("attendance_sessions",
-                             select="id,course_id,title,date")
+        sessions = self._get("attendance_sessions", select="id,course_id,title,date")
         records = self._get("attendance_records",
                             select="session_id,status",
                             student_id=f"eq.{self.student_id}")
@@ -204,9 +248,8 @@ class LMSClient:
             absent = statuses.count("absent")
             total = len(statuses)
             return {
-                "present": present,
-                "absent": absent,
-                "other": total - present - absent,   # e.g. late, excused
+                "present": present, "absent": absent,
+                "other": total - present - absent,
                 "total": total,
                 "percent": round(100 * present / total, 1) if total else None,
             }
@@ -215,14 +258,12 @@ class LMSClient:
         all_statuses = []
         for c in self.get_courses():
             statuses = [status_by_session[s["id"]] for s in sessions
-                        if s["course_id"] == c["id"]
-                        and s["id"] in status_by_session]
+                        if s["course_id"] == c["id"] and s["id"] in status_by_session]
             courses[c["id"]] = summarize(statuses)
             all_statuses += statuses
         return {"overall": summarize(all_statuses), "courses": courses}
 
     def get_submissions(self):
-        """Your own submission records, keyed by assignment_id for easy lookup."""
         rows = self._get(
             "assignment_submissions",
             select="assignment_id,file_name,submitted_at,grade",
@@ -231,15 +272,9 @@ class LMSClient:
         return {r["assignment_id"]: r for r in rows}
 
     def get_assignments_with_status(self, course_id=None):
-        """
-        Assignments annotated with submission status.
-        status: "submitted" (has a file), "logged_no_file" (record but no file),
-                "overdue" (past due, nothing submitted), "pending" (not due yet).
-        """
         assignments = self.get_assignments(course_id)
         submissions = self.get_submissions()
         now = datetime.now(timezone.utc)
-
         out = []
         for a in assignments:
             due = datetime.fromisoformat(a["due_date"].replace("Z", "+00:00"))
@@ -256,11 +291,6 @@ class LMSClient:
         return out
 
     def get_attendance_records_detailed(self):
-        """
-        One row per attendance record, joined with its session's course and date.
-        Used by the monitor to detect newly-marked attendance.
-        NOTE: selects only id/course_id/title/date from sessions - never qr_token.
-        """
         sessions = {s["id"]: s for s in self._get(
             "attendance_sessions", select="id,course_id,title,date")}
         records = self._get(
@@ -281,7 +311,6 @@ class LMSClient:
         return out
 
     def get_clos(self, course_id):
-        """Course Learning Outcomes for one course, ordered by clo_number."""
         return self._get(
             "course_clos",
             select="clo_number,description,bt_level",
@@ -300,7 +329,7 @@ class LMSClient:
         else:
             m = re.search(r'filename="?([^";]+)"?', cd, re.I)
             name = m.group(1).strip() if m else fallback
-        name = os.path.basename(name)                    # no path tricks
+        name = os.path.basename(name)
         name = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", name)
         return name or fallback
 
@@ -314,23 +343,17 @@ class LMSClient:
         try:
             if r.status_code != 200:
                 raise LMSError(f"Download failed (HTTP {r.status_code})")
-
             ctype = r.headers.get("Content-Type", "").lower()
             if "text/html" in ctype:
-                raise LMSError("Got a web page instead of the file "
-                               "(session not accepted).")
-
+                raise LMSError("Got a web page instead of the file (session not accepted).")
             size = int(r.headers.get("Content-Length") or 0)
             if size > MAX_DOWNLOAD_BYTES:
-                raise LMSError("File is larger than Telegram's 50 MB limit.")
-
+                raise LMSError("File is larger than the 100 MB limit.")
             name = self._filename_from_headers(r.headers, resource_id)
             if os.path.splitext(name)[1].lower() not in ALLOWED_EXTENSIONS:
                 raise LMSError(f"Unsupported file type: {name}")
-
             os.makedirs(folder, exist_ok=True)
             path = os.path.join(folder, name)
-
             written = 0
             with open(path, "wb") as f:
                 for chunk in r.iter_content(8192):
@@ -338,31 +361,31 @@ class LMSClient:
                     if written > MAX_DOWNLOAD_BYTES:
                         f.close()
                         os.remove(path)
-                        raise LMSError("File is larger than 50 MB.")
+                        raise LMSError("File exceeds 100 MB limit.")
                     f.write(chunk)
             return path
         finally:
             r.close()
 
+    # ---------- class helper ----------
+
+    @classmethod
+    def login_once(cls, email, password, token_file=None):
+        """Create a fresh client, log in, return it. Raises requests.HTTPError on bad credentials."""
+        client = cls(email=email, password=password, token_file=token_file)
+        client.login()          # raises HTTPError on 400/401
+        return client
+
 
 if __name__ == "__main__":
     lms = LMSClient()
-
     courses = lms.get_courses()
     print(f"\nCourses: {len(courses)}")
     for c in courses:
         print(f"  {c.get('code')} - {c.get('name')}")
-
     assignments = lms.get_assignments()
     print(f"\nAssignments: {len(assignments)}")
-    for a in assignments:
-        print(f"  {a['due_date']}  {a['title']}")
-
     resources = lms.get_resources()
     print(f"\nResources: {len(resources)} (newest first)")
     for x in resources[:5]:
         print(f"  {x['created_at'][:10]}  {x['title']}")
-
-    if resources:
-        path = lms.download_resource(resources[0]["id"])
-        print(f"\nDownloaded newest resource to: {path}")
