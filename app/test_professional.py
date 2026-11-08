@@ -229,6 +229,10 @@ class TestProfessionalConversations(unittest.TestCase):
         lms = ProfessionalMockLMS()
         usr.set_client(chat_id, lms)
 
+        # Pre-seed translation for ur-roman greeting so the test is hermetic without external providers or cache
+        from app.llm.i18n import _set_cached_translation
+        _set_cached_translation("ur-roman", "greeting", "👋 Salam! Main TaleemGo AI hoon, aapka university LMS assistant.")
+
         # 1. Roman Urdu greeting
         wa_bot.handle(chat_id, "salam")
         self.assertEqual(len(self.sent_texts), 1)
