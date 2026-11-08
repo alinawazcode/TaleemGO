@@ -10,3 +10,4 @@ ExecStart=/bin/bash /opt/taleemgo/app-src/deploy/backup.sh
 StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=taleemgo-backup
+

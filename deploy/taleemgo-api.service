@@ -27,3 +27,4 @@ SyslogIdentifier=taleemgo-api
 
 [Install]
 WantedBy=multi-user.target
+

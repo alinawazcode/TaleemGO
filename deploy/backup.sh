@@ -55,3 +55,4 @@ find "${BACKUP_DIR}" -maxdepth 1 -name "taleemgo-backup-*.tar.gz" -type f | \
 
 BACKUP_COUNT="$(find "${BACKUP_DIR}" -maxdepth 1 -name "taleemgo-backup-*.tar.gz" -type f | wc -l)"
 echo "[BACKUP] Retained ${BACKUP_COUNT} backup archives in ${BACKUP_DIR}."
+

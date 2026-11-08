@@ -266,3 +266,4 @@ Azure charges student credits by the minute while a VM is allocated.
      ```
   2. In Azure Portal, open the **Resource Group** containing the VM.
   3. Click **Delete resource group**, type the confirmation name, and delete all resources (VM, Disk, Network Interface, Public IP, NSG, VNet).
+

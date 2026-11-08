@@ -30,3 +30,4 @@ SyslogIdentifier=taleemgo-bridge
 
 [Install]
 WantedBy=multi-user.target
+
