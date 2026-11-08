@@ -22,7 +22,7 @@ from starlette.concurrency import run_in_threadpool
 sys.path.insert(0, os.path.dirname(__file__))
 load_dotenv(os.path.join(os.path.dirname(__file__), "..", ".env"))
 
-from courses import clean_course_query, course_acronym, format_course_list, resolve_course  # noqa: E402
+from courses import _edit_distance_1, clean_course_query, course_acronym, format_course_list, resolve_course  # noqa: E402
 from lms_client import LMSClient, LMSAuthExpired, LMSError, summarize_grades  # noqa: E402
 from timeutils import to_local                                          # noqa: E402
 import wa_transport as wa                                               # noqa: E402
@@ -32,6 +32,7 @@ from wa_monitor import run_all_users                                    # noqa: 
 try:
     from app.llm.lang_data import (
         ACTIVATION_PHRASES_DEFAULT,
+        KEYWORDS,
         fold_arabic_script,
         matches_jailbreak_prefilter,
         sanitize_user_message,
@@ -49,6 +50,7 @@ try:
 except ImportError:
     from llm.lang_data import (
         ACTIVATION_PHRASES_DEFAULT,
+        KEYWORDS,
         fold_arabic_script,
         matches_jailbreak_prefilter,
         sanitize_user_message,
@@ -94,7 +96,8 @@ WELCOME = (
     "I use AI services to understand your messages. Never send your password except when I ask for it at login."
 )
 
-WEEK_RE = re.compile(r"^(?:week|wk|w|lecture|lec|l)\s*(\d+)$", re.IGNORECASE)
+WEEK_RE = re.compile(r"^(?:week|wk|w|lecture|lec|l|hafta|hafte|hafto|هفتو|هفتي|ہفتہ|ہفتے)\s*(\d+)$", re.IGNORECASE)
+WEEK_SEARCH_RE = re.compile(r"\b(?:week|wk|w|lecture|lec|l|hafta|hafte|hafto|هفتو|هفتي|ہفتہ|ہفتے)\s*(\d+)\b", re.IGNORECASE)
 
 ASSIGNMENT_EMOJI = {
     "submitted": "✅",
@@ -646,6 +649,20 @@ def _handle_download_cmd(chat_id: str, lms, arg: str):
         _reply(chat_id, "Usage: download <course> [week N | title]")
         return
 
+    # Check if arg mentions latest
+    arg_lower = arg.lower()
+    is_latest = False
+    latest_kws = KEYWORDS.get("latest", [])
+    for kw in latest_kws:
+        if re.search(r"\b" + re.escape(kw.lower()) + r"\b", arg_lower):
+            is_latest = True
+            break
+        if len(kw) >= 5:
+            for word in re.findall(r"\b[a-z]+\b", arg_lower):
+                if len(word) >= 5 and _edit_distance_1(word, kw.lower()):
+                    is_latest = True
+                    break
+
     words = arg.split()
     best_matches = []
     best_idx = 0
@@ -660,16 +677,29 @@ def _handle_download_cmd(chat_id: str, lms, arg: str):
     user = usr.get_user(chat_id)
     lang = user.get("lang", "en") if user else "en"
 
+    remainder = " ".join(words[best_idx:]).strip() if best_matches else ""
+
+    if not best_matches:
+        # Fallback: check if there is an explicit week and clean the rest of arg
+        m_wk = WEEK_SEARCH_RE.search(arg)
+        arg_to_clean = arg
+        if m_wk:
+            remainder = f"week {m_wk.group(1)}"
+            arg_to_clean = (arg[:m_wk.start()] + " " + arg[m_wk.end():]).strip()
+        c_clean = clean_course_query(arg_to_clean)
+        if c_clean:
+            hits = resolve_course(lms, c_clean)
+            if hits:
+                best_matches = hits
+
     if not best_matches:
         courses = lms.get_courses()
-        usr.set_pending_action(chat_id, {"intent": "download"})
+        usr.set_pending_action(chat_id, {"intent": "download", "latest": is_latest})
         _reply(chat_id, t("course_not_found", lang, courses=format_course_list(courses)))
         return
 
-    remainder = " ".join(words[best_idx:]).strip()
-
     if len(best_matches) == 1:
-        _handle_download_for_course(chat_id, lms, best_matches[0], remainder, lang=lang)
+        _handle_download_for_course(chat_id, lms, best_matches[0], remainder, is_latest=is_latest, lang=lang)
     else:
         options = "\n".join(f"{i}. {c.get('code')} {c.get('name')}" for i, c in enumerate(best_matches, 1))
         usr.set_pending(chat_id, {
@@ -677,6 +707,7 @@ def _handle_download_cmd(chat_id: str, lms, arg: str):
             "courses": best_matches,
             "command": "download",
             "extra": remainder,
+            "is_latest": is_latest,
         })
         _reply(chat_id, t("which_course", lang, options=options))
 
@@ -1319,23 +1350,23 @@ def _handle_active(chat_id: str, text: str, user: dict):
         else:
             usr.clear_pending_action(chat_id)
 
-    # 2c. Course-only menu check (Part B: "Ai course" alone, no pending action)
-    action_words = {
-        "attendance", "hazri", "haziri", "حاضري", "حاضری", "assignment", "assignments",
-        "deadline", "deadlines", "due", "upcoming", "lecture", "lectures", "slides",
-        "notes", "download", "bhejo", "bhej", "send", "clo", "clos", "grade", "grades",
-        "marks", "nambar", "help", "greeting", "logout", "login",
-        "فائل", "ليڪچر", "سلائيڊس", "نوٽس", "موڪليو", "موڪل", "ڏيو", "ڊائونلوڊ", "لیکچر",
-        "سلائیڈز", "نوٹس", "بھیجو", "بھیج دو", "ڈاؤنلوڈ", "moklyo", "mokal", "diyo", "de do",
-        "latest", "newest", "recent", "last", "new", "naya", "nayi", "naye", "akhri", "aakhri",
-        "آخری", "نیا", "نئی", "نئون", "آخري",
-    }
-    words_in_text = set(re.findall(r"[A-Za-z0-9\u0600-\u06FF]+", text.lower()))
-    has_action_kw = bool(words_in_text & action_words)
-    if not has_action_kw:
-        c_query = clean_course_query(text)
-        if c_query:
-            matches = resolve_course(lms, c_query)
+    # 2c. Course-only menu check (Part B: "Ai course", "Ai", "CC-311" alone, no pending action)
+    candidate_tokens = [re.sub(r"^[^\w]+|[^\w]+$", "", t) for t in text.strip().split()]
+    candidate_tokens = [t for t in candidate_tokens if t]
+    course_generic_words = {"course", "courses", "subject", "subjects", "class", "classes", "kors", "mazmoon", "کورس", "کورسز", "ڪورس", "ڪورسز", "مضمون", "ڪلاس", "کلاس"}
+    non_generic = [t for t in candidate_tokens if t.lower() not in course_generic_words]
+    c_cand = " ".join(non_generic) if non_generic else ""
+    if c_cand:
+        # Only treat as course-only menu if the message doesn't match an explicit action intent
+        rule_check = match_rules(text)
+        has_explicit_intent = rule_check and (
+            rule_check.get("unsupported")
+            or rule_check.get("off_topic")
+            or any(a.get("intent") in ("attendance", "download", "resources", "clos", "grades", "assignments", "upcoming", "help", "greeting")
+                   for a in rule_check.get("actions", []))
+        )
+        if not has_explicit_intent:
+            matches = resolve_course(lms, c_cand)
             if len(matches) == 1:
                 course = matches[0]
                 acr = course_acronym(course.get("name", "")) or course["code"]
