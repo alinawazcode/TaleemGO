@@ -77,6 +77,7 @@ SINDHI_ROMAN_MARKERS = {
     "munhinji", "munhinjo", "munhinja", "ketri", "ketro", "aahe", "aahin",
     "moklyo", "mokal", "hafto", "pehrio", "pehrin", "sabhani", "kors", "madad",
     "diyo", "dekharo", "chha", "khaan", "karyo", "aj", "hui", "hua",
+    "salam", "salaam", "assalam", "asalam",
 }
 
 URDU_ROMAN_MARKERS = {
@@ -84,6 +85,7 @@ URDU_ROMAN_MARKERS = {
     "hafta", "hafte", "pehla", "pehle", "kal", "aaj", "madad", "chahiye",
     "ka", "ki", "ke", "ky", "ko", "se", "par", "kya", "batao", "dikhao", "nambar", "akhri", "aakhri",
     "naya", "nayi", "naye", "mein", "wala", "wali", "wale", "kuch",
+    "salam", "salaam", "assalam", "asalam",
 }
 
 URDU_GRAMMAR_MARKERS = {
@@ -136,6 +138,8 @@ def detect_language(text: str, stored_lang: str = "en", is_recent: bool = True) 
 
     # 3. Urdu Roman wins if Urdu markers or Urdu grammar present
     if (ur_score > 0 and ur_score >= en_score) or has_ur_grammar:
+        if sd_score == ur_score and stored_lang in ("sd", "sd-roman"):
+            return "sd-roman"
         return "ur-roman"
 
     # 4. English wins if English markers present and no Urdu grammar
