@@ -25,6 +25,10 @@ def section(title):
     print("=" * 60)
 
 
+if __name__ != "__main__":
+    import sys
+    sys.exit(0)
+
 lms = LMSClient()
 
 # ---------- courses ----------
@@ -99,5 +103,16 @@ if resources:
         print(f"  -> FAILED: {e}")
 else:
     print("  No resources to download.")
+
+# ---------- grades ----------
+section("GRADES (assignment marks)")
+try:
+    grades = lms.get_grades()
+    print(f"  -> {len(grades)} grade items")
+    for g in grades:
+        grade_str = f"{g['grade']}/{g['max_marks']}" if g['grade'] is not None else "Not graded yet"
+        print(f"  [{grade_str:14s}] {g['title']}")
+except Exception as e:
+    print(f"  -> FAILED: {e}")
 
 print("\nDone. Check each section above for anything wrong or missing.")

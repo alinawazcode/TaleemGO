@@ -280,6 +280,7 @@ def purge_user_data(chat_id: str):
     import shutil
     delete_user(chat_id)
     clear_pending(chat_id)
+    clear_pending_action(chat_id)
     clear_strikes(chat_id)
     clear_hourly_calls(chat_id)
     try:
@@ -325,6 +326,39 @@ def get_pending(chat_id: str):
 def clear_pending(chat_id: str):
     with _pending_lock:
         _pending_choices.pop(chat_id, None)
+
+
+# --- In-memory pending actions (10 min TTL) ---
+
+_pending_actions: dict = {}
+_pending_action_lock = threading.Lock()
+
+
+def set_pending_action(chat_id: str, action: dict, ttl: int = 600):
+    """Store unfinished action awaiting a course query in memory with TTL."""
+    with _pending_action_lock:
+        act = dict(action)
+        act["ts"] = time.time()
+        act["expires_at"] = time.time() + ttl
+        _pending_actions[chat_id] = act
+
+
+def get_pending_action(chat_id: str):
+    """Retrieve stored unfinished action if not expired."""
+    with _pending_action_lock:
+        act = _pending_actions.get(chat_id)
+        if not act:
+            return None
+        if time.time() > act.get("expires_at", 0):
+            _pending_actions.pop(chat_id, None)
+            return None
+        return act
+
+
+def clear_pending_action(chat_id: str):
+    """Clear stored pending action."""
+    with _pending_action_lock:
+        _pending_actions.pop(chat_id, None)
 
 
 # --- Strike tracking & Lockout ---

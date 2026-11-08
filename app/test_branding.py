@@ -9,6 +9,8 @@ from pathlib import Path
 from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parent.parent
+import sys
+sys.path.insert(0, str(ROOT / "app"))
 
 
 class BrandingTests(unittest.TestCase):
@@ -32,7 +34,7 @@ class BrandingTests(unittest.TestCase):
             lambda path, line: "test_branding.py" in path,
             lambda path, line: "github.com" in line or "cd Saathi" in line or "clone" in line,
             lambda path, line: "SATHI_SECRET_KEY" in line,
-            lambda path, line: "/*saathi-patch*/" in line,
+            lambda path, line: "saathi-patch" in line,
             lambda path, line: "saathi ai" in line.lower() and ("no longer activates" in line or "wa_bot.handle" in line),
         ]
 

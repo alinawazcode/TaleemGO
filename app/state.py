@@ -11,10 +11,12 @@ STATE_FILE = str(DATA_DIR / "monitor_state.json")
 
 DEFAULT_STATE = {
     "seeded": False,
+    "grades_seeded": False,
     "resources": [],
     "assignments": [],
     "attendance": [],
     "reminders_sent": [],
+    "grades": {},
 }
 
 

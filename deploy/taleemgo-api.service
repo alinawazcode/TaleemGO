@@ -1,0 +1,30 @@
+[Unit]
+Description=TaleemGo AI - FastAPI WhatsApp Webhook Router
+After=network.target
+
+[Service]
+Type=simple
+User=taleemgo
+Group=taleemgo
+WorkingDirectory=/opt/taleemgo/app-src
+EnvironmentFile=/opt/taleemgo/.env
+ExecStart=/opt/taleemgo/venv/bin/uvicorn app.wa_bot:api --host 127.0.0.1 --port 8000
+Restart=always
+RestartSec=5
+
+# Security hardening
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=read-only
+ReadWritePaths=/opt/taleemgo
+LimitNOFILE=65535
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=taleemgo-api
+
+[Install]
+WantedBy=multi-user.target
+

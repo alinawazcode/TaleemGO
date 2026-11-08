@@ -2,6 +2,9 @@
 // Forwards every incoming 1:1 message to Python with { chat_id, text }.
 // /send and /send-file accept { chat_id, text/path/caption } in the body.
 require("dotenv").config();
+const fs = require("fs");
+const path = require("path");
+const { execFileSync } = require("child_process");
 const express = require("express");
 const qrcode = require("qrcode-terminal");
 const { Client, LocalAuth, MessageMedia } = require("whatsapp-web.js");
@@ -9,7 +12,9 @@ const { Client, LocalAuth, MessageMedia } = require("whatsapp-web.js");
 const PORT = parseInt(process.env.BRIDGE_PORT || "3001", 10);
 const PY_URL = process.env.PY_WEBHOOK || "http://127.0.0.1:8000/incoming";
 const TOKEN = process.env.BRIDGE_TOKEN || "";
-const CHROME_PATH = process.env.CHROME_PATH || "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe";
+const CHROME_PATH = process.env.CHROME_PATH || (process.platform === "win32"
+  ? "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe"
+  : "/usr/bin/google-chrome-stable");
 // Optional: owner's own number for self-chat testing
 const ADMIN_NUMBER = (process.env.ADMIN_NUMBER || "").replace(/\D/g, "");
 const DEBUG_SELF = process.env.DEBUG_SELF === "1";
@@ -111,41 +116,100 @@ async function learnOwnLid() {
     : "[SELF] own LID not found. Set DEBUG_SELF=1, send yourself a message, copy the full to= value into ADMIN_LID in .env");
 }
 
-// Windows: a hard-stopped bridge often leaves its hidden Chrome running, which locks the saved
+// Windows & Linux: a hard-stopped bridge often leaves hidden Chrome running, which locks the saved
 // WhatsApp session and makes the next start hang. Kill only Chrome processes that use our session folder.
 function killStaleChrome() {
-  if (process.platform !== "win32") return;
+  if (process.platform === "win32") {
+    try {
+      execFileSync("powershell", [
+        "-NoProfile", "-Command",
+        "Get-CimInstance Win32_Process -Filter \"Name='chrome.exe'\" | " +
+        "Where-Object { $_.CommandLine -like '*wwebjs_auth*' } | " +
+        "ForEach-Object { Stop-Process -Id $_.ProcessId -Force }",
+      ], { stdio: "ignore", timeout: 20000 });
+      console.log("[START] checked for leftover bridge Chrome processes");
+    } catch (e) {
+      console.log("[START] leftover-Chrome check skipped:", e.message);
+    }
+  } else {
+    try {
+      execFileSync("pkill", ["-f", "wwebjs_auth"], { stdio: "ignore", timeout: 5000 });
+      console.log("[START] checked for leftover bridge Chrome processes (Linux)");
+    } catch (e) {
+      // pkill exits with 1 when no matching process is found — that is normal
+    }
+  }
+}
+
+// Remove stale Singleton locks left behind by a hard stop of the VM or Chrome crash
+function removeStaleSingletonLocks() {
+  const authDir = path.join(__dirname, ".wwebjs_auth");
+  if (!fs.existsSync(authDir)) return;
   try {
-    require("child_process").execFileSync("powershell", [
-      "-NoProfile", "-Command",
-      "Get-CimInstance Win32_Process -Filter \"Name='chrome.exe'\" | " +
-      "Where-Object { $_.CommandLine -like '*wwebjs_auth*' } | " +
-      "ForEach-Object { Stop-Process -Id $_.ProcessId -Force }",
-    ], { stdio: "ignore", timeout: 20000 });
-    console.log("[START] checked for leftover bridge Chrome processes");
+    const entries = fs.readdirSync(authDir, { withFileTypes: true });
+    for (const ent of entries) {
+      if (ent.isDirectory() && ent.name.startsWith("session")) {
+        const sessionPath = path.join(authDir, ent.name);
+        const lockNames = ["SingletonLock", "SingletonCookie", "SingletonSocket"];
+        const dirsToCheck = [sessionPath, path.join(sessionPath, "Default")];
+        for (const dir of dirsToCheck) {
+          if (!fs.existsSync(dir)) continue;
+          for (const name of lockNames) {
+            const lockFile = path.join(dir, name);
+            try {
+              const st = fs.lstatSync(lockFile);
+              if (st) {
+                fs.unlinkSync(lockFile);
+                console.log(`[START] removed stale ${name} in ${path.relative(authDir, lockFile)}`);
+              }
+            } catch (e) {
+              // not present or already removed
+            }
+          }
+        }
+      }
+    }
   } catch (e) {
-    console.log("[START] leftover-Chrome check skipped:", e.message);
+    console.log("[START] lock cleanup skipped:", e.message);
   }
 }
 
 if (require.main === module) {
   killStaleChrome();
+  removeStaleSingletonLocks();
+  const puppeteerArgs = process.platform === "win32"
+    ? ["--no-sandbox", "--disable-setuid-sandbox"]
+    : [
+        "--no-sandbox",
+        "--disable-setuid-sandbox",
+        "--disable-dev-shm-usage",
+        "--disable-gpu",
+        "--no-first-run",
+      ];
+
   client = new Client({
     authStrategy: new LocalAuth({ dataPath: "./.wwebjs_auth" }),
     puppeteer: {
       headless: true,
       executablePath: CHROME_PATH,
-      args: ["--no-sandbox", "--disable-setuid-sandbox"],
+      args: puppeteerArgs,
     },
   });
 
   client.on("qr", (qr) => {
     console.log("Scan QR with WhatsApp > Linked devices:");
     qrcode.generate(qr, { small: true });
+    try {
+      fs.writeFileSync(path.join(__dirname, "last_qr.txt"), qr, "utf8");
+    } catch (e) { /* ignore */ }
   });
 
   client.on("ready", () => {
     ready = true;
+    try {
+      const qrPath = path.join(__dirname, "last_qr.txt");
+      if (fs.existsSync(qrPath)) fs.unlinkSync(qrPath);
+    } catch (e) { /* ignore */ }
     const wid = client.info?.wid?._serialized || null;
     const lid = client.info?.lid?._serialized || (typeof client.info?.lid === "string" ? client.info.lid : null);
     console.log(`WhatsApp ready. Own WID: ${wid}, LID: ${lid}`);
@@ -226,6 +290,10 @@ if (require.main === module) {
     if (!ready) return res.status(503).json({ error: "not ready" });
     const { chat_id, text } = req.body;
     if (!chat_id) return res.status(400).json({ error: "chat_id required" });
+    if (typeof text !== "string" || !text.trim()) {
+      console.log("[SEND] rejected empty text");
+      return res.status(400).json({ error: "empty text" });
+    }
     try {
       await client.sendMessage(chat_id, "🤖 " + text);
       res.json({ ok: true });

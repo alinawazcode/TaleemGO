@@ -1,4 +1,5 @@
 """Thin client for the local WhatsApp bridge — multi-user version."""
+import inspect
 import logging
 import os
 import time
@@ -32,7 +33,23 @@ def _throttle():
         _last_send = time.time()
 
 
+def _get_caller_name(default_name: str) -> str:
+    try:
+        stack = inspect.stack()
+        if len(stack) > 2:
+            return stack[2].function
+        elif len(stack) > 1:
+            return stack[1].function
+    except Exception:
+        pass
+    return default_name
+
+
 def send_text(chat_id: str, text: str) -> None:
+    if text is None or not str(text).strip():
+        caller = _get_caller_name("send_text")
+        log.info("[SEND] empty text suppressed caller=%s", caller)
+        return
     _throttle()
     for attempt in (1, 2):
         try:
@@ -60,6 +77,8 @@ def send_text(chat_id: str, text: str) -> None:
 
 
 def send_file(chat_id: str, path: str, caption: str = "") -> None:
+    if not caption or not str(caption).strip():
+        caption = os.path.basename(path)
     _throttle()
     for attempt in (1, 2):
         try:
