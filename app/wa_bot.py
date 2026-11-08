@@ -9,6 +9,8 @@ import logging
 import os
 import re
 import sys
+import threading
+import time
 from datetime import datetime, timedelta
 
 import requests
@@ -26,7 +28,42 @@ import wa_transport as wa                                               # noqa: 
 import users as usr                                                     # noqa: E402
 from wa_monitor import run_all_users                                    # noqa: E402
 
-log = logging.getLogger("sathi.wa")
+try:
+    from app.llm.lang_data import (
+        ACTIVATION_PHRASES_DEFAULT,
+        fold_arabic_script,
+        matches_jailbreak_prefilter,
+        sanitize_user_message,
+    )
+    from app.llm.i18n import t
+    from app.llm.intent import add_user_history, get_user_history
+    from app.llm.providers import (
+        PROVIDER_CONFIGS,
+        is_valid_api_key,
+        registry,
+        run_live_check,
+    )
+    from app.llm.router import get_configured_providers, is_llm_enabled, route_intent
+    from app.llm.rules import match_rules
+except ImportError:
+    from llm.lang_data import (
+        ACTIVATION_PHRASES_DEFAULT,
+        fold_arabic_script,
+        matches_jailbreak_prefilter,
+        sanitize_user_message,
+    )
+    from llm.i18n import t
+    from llm.intent import add_user_history, get_user_history
+    from llm.providers import (
+        PROVIDER_CONFIGS,
+        is_valid_api_key,
+        registry,
+        run_live_check,
+    )
+    from llm.router import get_configured_providers, is_llm_enabled, route_intent
+    from llm.rules import match_rules
+
+log = logging.getLogger("taleemgo.wa")
 logging.basicConfig(level=logging.INFO)
 
 TOKEN = os.environ.get("BRIDGE_TOKEN", "")
@@ -35,12 +72,12 @@ ATTENDANCE_WARN = float(os.environ.get("ATTENDANCE_WARN", "75"))
 
 ACTIVATION_PHRASES = [
     p.strip().lower()
-    for p in os.environ.get("ACTIVATION_PHRASES", "saathi ai,sathi ai").split(",")
+    for p in os.environ.get("ACTIVATION_PHRASES", "taleemgo ai,taleem go ai,taleemgo").split(",")
     if p.strip()
 ]
 
 HELP = (
-    "Saathi commands:\n"
+    "TaleemGo AI commands:\n"
     "courses\nassignments\nupcoming\n"
     "resources <course>\nattendance [course]\nclos <course>\n"
     "download <course> [week N | title]\n"
@@ -49,9 +86,10 @@ HELP = (
 )
 
 WELCOME = (
-    "👋 Welcome to Saathi — your LMS assistant on WhatsApp!\n\n"
+    "👋 Welcome to TaleemGo AI — your LMS assistant on WhatsApp!\n\n"
     "To get started, please send me your *LMS email address*.\n\n"
-    "Send your LMS email to begin."
+    "Send your LMS email to begin.\n\n"
+    "I use AI services to understand your messages. Never send your password except when I ask for it at login."
 )
 
 WEEK_RE = re.compile(r"^(?:week|wk|w|lecture|lec|l)\s*(\d+)$", re.IGNORECASE)
@@ -79,6 +117,28 @@ def _start_monitor():
     api.state.sched = sched
     log.info("Monitor scheduled every %d min; stale cleanup every 2 min", minutes)
 
+    def _startup_llm_check():
+        if not is_llm_enabled():
+            return
+        time.sleep(1.0)
+        try:
+            for prov in get_configured_providers():
+                cfg = PROVIDER_CONFIGS.get(prov)
+                if not cfg:
+                    continue
+                raw_key = os.environ.get(cfg["env_key"], "")
+                if not is_valid_api_key(raw_key):
+                    continue
+                status, model_id, latency = run_live_check(prov)
+                if status == "ok":
+                    log.info("[LLM] %s OK model=%s %dms", prov, model_id, int(latency))
+                else:
+                    log.warning("[LLM] %s FAILED %s model=%s", prov, status, model_id)
+        except Exception as e:
+            log.warning("Startup LLM live check error: %s", e)
+
+    threading.Thread(target=_startup_llm_check, daemon=True).start()
+
 
 # ---- helpers ----
 
@@ -102,6 +162,17 @@ def contains_activation_phrase(text: str, phrases=None) -> bool:
         clean_p = _clean_text(p)
         if clean_p and clean_p in clean_msg:
             return True
+
+    # Also check Arabic/Sindhi script folded phrases from lang_data
+    try:
+        folded_msg = fold_arabic_script(text.lower())
+        for ap in ACTIVATION_PHRASES_DEFAULT:
+            folded_ap = fold_arabic_script(ap.lower())
+            if folded_ap and folded_ap in folded_msg:
+                return True
+    except Exception:
+        pass
+
     return False
 
 
@@ -457,7 +528,6 @@ def _handle_pending(chat_id: str, lms, pending: dict, text: str) -> bool:
             _send_files_choice(chat_id, lms, files, indices=nums)
             return True
 
-        usr.clear_pending(chat_id)
         return False
 
     elif pending.get("type") == "course":
@@ -480,7 +550,6 @@ def _handle_pending(chat_id: str, lms, pending: dict, text: str) -> bool:
                 _reply(chat_id, f"Please pick a number between 1 and {len(courses)}.")
                 return True
 
-        usr.clear_pending(chat_id)
         return False
 
     return False
@@ -493,6 +562,32 @@ def _handle_cmd_users(chat_id: str):
     for i, u in enumerate(summary, 1):
         email_str = u.get("email") or "(no email)"
         lines.append(f"{i}. {email_str} ({u.get('status', 'unknown')})")
+    _reply(chat_id, "\n".join(lines))
+
+
+def _handle_cmd_llm(chat_id: str):
+    summary = registry.get_summary()
+    locked_count = usr.count_locked_users()
+    lines = ["TaleemGo AI LLM Status:"]
+    for prov, data in summary.items():
+        status = data["status"]
+        model = data.get("model", "")
+        calls = data["calls_today"]
+        last_err = data["last_error"]
+        lines.append(f"- {prov}: {status} (model: {model}) | calls today: {calls} | last error: {last_err}")
+    lines.append(f"\nLocked users: {locked_count} locked")
+    _reply(chat_id, "\n".join(lines))
+
+
+def _handle_cmd_llm_test(chat_id: str):
+    providers = get_configured_providers()
+    lines = ["TaleemGo AI LLM Test:"]
+    for prov in providers:
+        status, model_id, latency = run_live_check(prov)
+        if status == "ok":
+            lines.append(f"- {prov}: ok ({model_id}, {int(latency)}ms)")
+        else:
+            lines.append(f"- {prov}: {status} ({model_id})")
     _reply(chat_id, "\n".join(lines))
 
 
@@ -515,14 +610,14 @@ def _handle_locked(chat_id: str, text: str, is_self: bool = False):
                 # Do nothing at all: no reply, no DB row, no directory, no log of text
                 return
             if not usr.try_register(chat_id, is_admin=False):
-                _reply(chat_id, f"Saathi is full right now ({MAX_USERS}/{MAX_USERS} users). Please try again later.")
+                _reply(chat_id, f"TaleemGo AI is full right now ({MAX_USERS}/{MAX_USERS} users). Please try again later.")
                 return
             _reply(chat_id, WELCOME)
             return
         else:
             # Self-chat skips activation phrase
             if not usr.try_register(chat_id, is_admin=True):
-                _reply(chat_id, f"Saathi is full right now ({MAX_USERS}/{MAX_USERS} users). Please try again later.")
+                _reply(chat_id, f"TaleemGo AI is full right now ({MAX_USERS}/{MAX_USERS} users). Please try again later.")
                 return
             _reply(chat_id, WELCOME)
             return
@@ -554,6 +649,14 @@ def _handle_locked(chat_id: str, text: str, is_self: bool = False):
     if word == "users":
         if user.get("is_admin"):
             _handle_cmd_users(chat_id)
+        return
+    if word == "llm":
+        if user.get("is_admin"):
+            parts = text_stripped.split()
+            if len(parts) > 1 and parts[1].lower() == "test":
+                _handle_cmd_llm_test(chat_id)
+            else:
+                _handle_cmd_llm(chat_id)
         return
 
     if status == "awaiting_email":
@@ -616,6 +719,280 @@ def _handle_awaiting_password(chat_id: str, user: dict, text: str):
     _reply(chat_id, f"✅ Connected as {email}\n\n{HELP}")
 
 
+_user_help_sent: dict = {}
+_help_lock = threading.Lock()
+
+
+def _are_all_providers_failing() -> bool:
+    """Returns True only when providers are configured with valid keys but all are failing/in cooldown."""
+    providers = get_configured_providers()
+    has_valid_key = False
+    for prov in providers:
+        cfg = PROVIDER_CONFIGS.get(prov)
+        if cfg and is_valid_api_key(os.environ.get(cfg["env_key"], "")):
+            has_valid_key = True
+            if registry.is_available(prov):
+                return False
+    return has_valid_key
+
+
+def _maybe_send_help_fallback(chat_id: str, lang: str, is_busy: bool = False):
+    now = time.time()
+    interval_sec = int(os.environ.get("LLM_HELP_REPLY_INTERVAL_MIN", "2")) * 60
+    with _help_lock:
+        last = _user_help_sent.get(chat_id, 0.0)
+        if now - last >= interval_sec:
+            _user_help_sent[chat_id] = now
+            key = "busy" if is_busy else "not_understood"
+            _reply(chat_id, t(key, lang, help=t("help", lang)))
+
+
+def _dispatch_exact_cmd(chat_id: str, lms, word: str, arg: str):
+    usr.clear_pending(chat_id)
+    if word in ("download", "dl"):
+        _handle_download_cmd(chat_id, lms, arg)
+    elif word == "attendance":
+        _handle_attendance_cmd(chat_id, lms, arg)
+    elif word == "resources":
+        _handle_resources_cmd(chat_id, lms, arg)
+    elif word == "clos":
+        _handle_clos_cmd(chat_id, lms, arg)
+    elif word == "courses":
+        _reply(chat_id, cmd_courses(lms, arg))
+    elif word == "assignments":
+        _reply(chat_id, cmd_assignments(lms, arg))
+    elif word == "upcoming":
+        _reply(chat_id, cmd_upcoming(lms, arg))
+
+
+def _handle_choose_action(chat_id: str, lms, act: dict, lang: str):
+    pending = usr.get_pending(chat_id)
+    if not pending:
+        return
+    if act.get("cancel"):
+        usr.clear_pending(chat_id)
+        _reply(chat_id, t("cancel_ack", lang))
+        return
+    files = pending.get("files", [])
+    if act.get("all"):
+        usr.clear_pending(chat_id)
+        _send_files_choice(chat_id, lms, files, indices=None)
+        return
+    nums = act.get("numbers")
+    if nums:
+        if any(n < 1 or n > len(files) for n in nums):
+            _reply(chat_id, f"Please pick a number between 1 and {len(files)}.")
+            return
+        usr.clear_pending(chat_id)
+        _send_files_choice(chat_id, lms, files, indices=nums)
+
+
+def _handle_download_action(chat_id: str, lms, act: dict, lang: str):
+    cq = act.get("course_query", "")
+    week = act.get("week")
+    tq = act.get("title_query", "")
+
+    if not cq:
+        courses = lms.get_courses()
+        _reply(chat_id, t("course_not_found", lang, courses=format_course_list(courses)))
+        return
+
+    hits = resolve_course(lms, cq)
+    if not hits:
+        courses = lms.get_courses()
+        _reply(chat_id, t("course_not_found", lang, courses=format_course_list(courses)))
+        return
+
+    remainder = f"week {week}" if week is not None else (tq or "")
+
+    if len(hits) == 1:
+        _handle_download_for_course(chat_id, lms, hits[0], remainder)
+    else:
+        options = "\n".join(f"{i}. {c.get('code')} {c.get('name')}" for i, c in enumerate(hits, 1))
+        usr.set_pending(chat_id, {
+            "type": "course",
+            "courses": hits,
+            "command": "download",
+            "extra": remainder,
+        })
+        _reply(chat_id, t("which_course", lang, options=options))
+
+
+def _execute_action(chat_id: str, lms, act: dict, lang: str):
+    intent = act.get("intent")
+    if intent == "courses":
+        _reply(chat_id, cmd_courses(lms))
+    elif intent == "assignments":
+        _reply(chat_id, cmd_assignments(lms))
+    elif intent == "upcoming":
+        _reply(chat_id, cmd_upcoming(lms))
+    elif intent == "help":
+        _reply(chat_id, t("help", lang))
+    elif intent == "attendance":
+        cq = act.get("course_query", "")
+        _handle_attendance_cmd(chat_id, lms, cq)
+    elif intent == "resources":
+        cq = act.get("course_query", "")
+        _handle_resources_cmd(chat_id, lms, cq)
+    elif intent == "clos":
+        cq = act.get("course_query", "")
+        _handle_clos_cmd(chat_id, lms, cq)
+    elif intent == "download":
+        _handle_download_action(chat_id, lms, act, lang)
+    elif intent == "choose":
+        _handle_choose_action(chat_id, lms, act, lang)
+
+
+def _handle_natural_language(chat_id: str, text: str, user: dict, lms):
+    is_admin = bool(user.get("is_admin"))
+
+    # 1. Explicit check for user requesting to log out or delete data
+    text_lower = text.lower()
+    logout_triggers = [
+        "delete my data", "delete data", "delete account", "remove my data",
+        "logout", "log me out", "sign out", "account delete", "data delete",
+        "ڈیٹا ڈیلیٹ", "اکاؤنٹ ڈیلیٹ", "لاگ آؤٹ", "لاگ آئوٽ", "ڊيٽا مٽايو", "کاتو ختم",
+    ]
+    if any(trig in text_lower for trig in logout_triggers):
+        lang = user.get("lang", "en")
+        _reply(chat_id, t("use_logout", lang))
+        return
+
+    # 2. Sanitise message
+    clean_text, is_anomaly = sanitize_user_message(text)
+    if is_anomaly:
+        just_locked = usr.record_strike(chat_id, strikes=1, is_admin=is_admin)
+        if just_locked and int(os.environ.get("LLM_NOTIFY_ON_LOCK", "1")):
+            lang = user.get("lang", "en")
+            hours = int(os.environ.get("LLM_LOCK_HOURS", "2"))
+            _reply(chat_id, t("lock_notice", lang, hours=hours, help=t("help", lang)))
+        return
+
+    if not clean_text:
+        return
+
+    # 3. Pre-filter jailbreak check (instant 2 strikes and lockout without calling provider)
+    if matches_jailbreak_prefilter(clean_text) or matches_jailbreak_prefilter(text):
+        just_locked = usr.record_strike(chat_id, strikes=2, is_admin=is_admin)
+        if just_locked and int(os.environ.get("LLM_NOTIFY_ON_LOCK", "1")):
+            lang = user.get("lang", "en")
+            hours = int(os.environ.get("LLM_LOCK_HOURS", "2"))
+            _reply(chat_id, t("lock_notice", lang, hours=hours, help=t("help", lang)))
+        return
+
+    has_pending = (usr.get_pending(chat_id) is not None)
+    stored_lang = user.get("lang", "en")
+
+    use_rules = False
+    if not is_llm_enabled():
+        use_rules = True
+    elif not usr.check_and_record_llm_limit(chat_id):
+        use_rules = True
+
+    parsed = None
+    if not use_rules:
+        history = get_user_history(chat_id)
+        parsed = route_intent(
+            clean_text,
+            has_pending_download=has_pending,
+            stored_lang=stored_lang,
+            history=history,
+        )
+        if parsed is None:
+            use_rules = True
+
+    if use_rules:
+        rule_res = match_rules(clean_text, has_pending_download=has_pending, stored_lang=stored_lang)
+        if rule_res and rule_res.get("unsupported"):
+            resp_lang = rule_res.get("lang", stored_lang)
+            if resp_lang != user.get("lang"):
+                usr.upsert_user(chat_id, lang=resp_lang)
+                user["lang"] = resp_lang
+            effective_lang = user.get("lang", "en")
+            _reply(chat_id, t("unsupported", effective_lang, help=t("help", effective_lang)))
+            return
+        elif rule_res and rule_res.get("actions"):
+            parsed = rule_res
+        else:
+            if not is_llm_enabled():
+                _reply(chat_id, HELP)
+            else:
+                is_busy = _are_all_providers_failing()
+                _maybe_send_help_fallback(chat_id, stored_lang, is_busy=is_busy)
+            return
+
+    # Language tag update
+    resp_lang = parsed.get("lang", stored_lang)
+    if resp_lang and resp_lang != user.get("lang"):
+        usr.upsert_user(chat_id, lang=resp_lang)
+        user["lang"] = resp_lang
+    effective_lang = user.get("lang", "en")
+
+    # Check unsupported from model (grades, marks, timetable, fees, results)
+    if parsed.get("unsupported"):
+        _reply(chat_id, t("unsupported", effective_lang, help=t("help", effective_lang)))
+        return
+
+    # Check off-topic from model
+    if parsed.get("off_topic"):
+        # Rescue check with rule matcher (Part S.7 & unsupported keywords)
+        rule_res = match_rules(clean_text, has_pending_download=has_pending, stored_lang=stored_lang)
+        if rule_res:
+            if rule_res.get("unsupported"):
+                rule_lang = rule_res.get("lang", effective_lang)
+                _reply(chat_id, t("unsupported", rule_lang, help=t("help", rule_lang)))
+                return
+            elif not rule_res.get("off_topic") and rule_res.get("actions"):
+                parsed = rule_res
+
+        if parsed.get("off_topic"):
+            just_locked = usr.record_strike(chat_id, strikes=1, is_admin=is_admin)
+            if just_locked and int(os.environ.get("LLM_NOTIFY_ON_LOCK", "1")):
+                lang = user.get("lang", "en")
+                hours = int(os.environ.get("LLM_LOCK_HOURS", "2"))
+                _reply(chat_id, t("lock_notice", lang, hours=hours, help=t("help", lang)))
+            return
+
+    add_user_history(chat_id, clean_text)
+
+    # Clarify
+    clarify = parsed.get("clarify")
+    if clarify:
+        if clarify == "course":
+            courses = lms.get_courses()
+            options = format_course_list(courses)
+            _reply(chat_id, t("which_course", effective_lang, options=options))
+        elif clarify == "week":
+            _reply(chat_id, t("which_week", effective_lang))
+        elif clarify == "what":
+            _reply(chat_id, t("what", effective_lang))
+        return
+
+    actions = parsed.get("actions", [])
+    if not actions:
+        return
+
+    if len(actions) == 1 and actions[0].get("intent") == "greeting":
+        if int(os.environ.get("GREETING_REPLY", "1")):
+            _reply(chat_id, t("greeting", effective_lang))
+        return
+
+    if actions[0].get("intent") == "greeting":
+        if int(os.environ.get("GREETING_REPLY", "1")):
+            _reply(chat_id, t("greeting", effective_lang))
+        actions = actions[1:]
+
+    has_lms_action = any(
+        a.get("intent") in ("courses", "assignments", "upcoming", "resources", "attendance", "clos", "download")
+        for a in actions
+    )
+    if has_lms_action:
+        _reply(chat_id, t("ack", effective_lang))
+
+    for act in actions:
+        _execute_action(chat_id, lms, act, effective_lang)
+
+
 def _handle_active(chat_id: str, text: str, user: dict):
     lms = usr.get_client(chat_id)
     if lms is None:
@@ -627,47 +1004,51 @@ def _handle_active(chat_id: str, text: str, user: dict):
         lms = LMSClient(token_file=tf)
         usr.set_client(chat_id, lms)
 
-    # Check if there is an in-memory pending selection
+    # 1. Check if there is an in-memory pending selection
     pending = usr.get_pending(chat_id)
     if pending is not None:
         if _handle_pending(chat_id, lms, pending, text):
             return
 
+    # 2. Exact command check
     text_stripped = text.strip()
     word, _, arg = text_stripped.partition(" ")
     word = word.lower().lstrip("/")
     arg = arg.strip()
 
-    try:
-        if word in ("download", "dl"):
-            _handle_download_cmd(chat_id, lms, arg)
-        elif word == "attendance":
-            _handle_attendance_cmd(chat_id, lms, arg)
-        elif word == "resources":
-            _handle_resources_cmd(chat_id, lms, arg)
-        elif word == "clos":
-            _handle_clos_cmd(chat_id, lms, arg)
-        elif word == "courses":
-            _reply(chat_id, cmd_courses(lms, arg))
-        elif word == "assignments":
-            _reply(chat_id, cmd_assignments(lms, arg))
-        elif word == "upcoming":
-            _reply(chat_id, cmd_upcoming(lms, arg))
-        else:
-            _reply(chat_id, HELP)
+    exact_cmds = {"download", "dl", "attendance", "resources", "clos", "courses", "assignments", "upcoming"}
+    if word in exact_cmds:
+        try:
+            _dispatch_exact_cmd(chat_id, lms, word, arg)
+        except LMSAuthExpired:
+            usr.upsert_user(chat_id, status="expired")
+            usr.remove_client(chat_id)
+            _reply(chat_id, "Your LMS session expired. Send `login` to sign in again.")
+        except Exception:
+            log.exception("Command failed for %s…", chat_id[-6:])
+            _reply(chat_id, "Something went wrong talking to the LMS. Try again.")
+        return
 
+    # 3. Lockout check (Part G)
+    is_admin = bool(user.get("is_admin"))
+    if usr.is_llm_locked(chat_id, is_admin=is_admin):
+        return
+
+    # 4. Natural language pipeline
+    try:
+        _handle_natural_language(chat_id, text, user, lms)
     except LMSAuthExpired:
         usr.upsert_user(chat_id, status="expired")
         usr.remove_client(chat_id)
         _reply(chat_id, "Your LMS session expired. Send `login` to sign in again.")
     except Exception:
-        log.exception("Command failed for %s…", chat_id[-6:])
+        log.exception("Natural language handling failed for %s…", chat_id[-6:])
         _reply(chat_id, "Something went wrong talking to the LMS. Try again.")
 
 
 def _do_logout(chat_id: str):
     usr.purge_user_data(chat_id)
-    _reply(chat_id, 'Logged out and all your data deleted. Send "Hi Saathi AI" to start again.')
+    _reply(chat_id, 'Logged out and all your data deleted. Send "Hi TaleemGo AI" to start again.')
 
 
 def _do_login_reset(chat_id: str):
@@ -678,7 +1059,7 @@ def _do_login_reset(chat_id: str):
         _reply(chat_id, "Please send your LMS email to sign in.")
     else:
         if not usr.try_register(chat_id, is_admin=False):
-            _reply(chat_id, f"Saathi is full right now ({MAX_USERS}/{MAX_USERS} users). Please try again later.")
+            _reply(chat_id, f"TaleemGo AI is full right now ({MAX_USERS}/{MAX_USERS} users). Please try again later.")
             return
         _reply(chat_id, "Please send your LMS email to sign in.")
 

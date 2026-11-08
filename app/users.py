@@ -1,5 +1,5 @@
 """
-users.py - Multi-user registry for Saathi WhatsApp bot.
+users.py - Multi-user registry for TaleemGo WhatsApp bot.
 
 Responsibilities:
 - SQLite users table (chat_id, email, status, attempt, is_admin, created_at, last_seen)
@@ -19,7 +19,7 @@ import os
 import sqlite3
 import threading
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -36,7 +36,7 @@ USERS_DIR.mkdir(parents=True, exist_ok=True)
 
 MAX_USERS = int(os.environ.get("MAX_USERS", "5"))
 
-log = logging.getLogger("sathi.users")
+log = logging.getLogger("taleemgo.users")
 
 # --- DB setup ---
 
@@ -53,18 +53,33 @@ def init_db():
     with _db_lock, _conn() as c:
         c.execute("""
             CREATE TABLE IF NOT EXISTS users (
-                chat_id    TEXT PRIMARY KEY,
-                email      TEXT,
-                status     TEXT NOT NULL DEFAULT 'awaiting_email',
-                attempt    INTEGER NOT NULL DEFAULT 0,
-                is_admin   INTEGER NOT NULL DEFAULT 0,
-                created_at TEXT,
-                last_seen  TEXT
+                chat_id          TEXT PRIMARY KEY,
+                email            TEXT,
+                status           TEXT NOT NULL DEFAULT 'awaiting_email',
+                attempt          INTEGER NOT NULL DEFAULT 0,
+                is_admin         INTEGER NOT NULL DEFAULT 0,
+                lang             TEXT NOT NULL DEFAULT 'en',
+                llm_locked_until TEXT,
+                created_at       TEXT,
+                last_seen        TEXT
             )
         """)
         cols = [r[1] for r in c.execute("PRAGMA table_info(users)").fetchall()]
         if "is_admin" not in cols:
             c.execute("ALTER TABLE users ADD COLUMN is_admin INTEGER NOT NULL DEFAULT 0")
+        if "lang" not in cols:
+            c.execute("ALTER TABLE users ADD COLUMN lang TEXT NOT NULL DEFAULT 'en'")
+        if "llm_locked_until" not in cols:
+            c.execute("ALTER TABLE users ADD COLUMN llm_locked_until TEXT")
+
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS i18n_cache (
+                lang TEXT,
+                key  TEXT,
+                text TEXT,
+                PRIMARY KEY (lang, key)
+            )
+        """)
         c.commit()
 
 
@@ -261,10 +276,20 @@ def remove_client(chat_id: str):
 
 
 def purge_user_data(chat_id: str):
-    """Delete DB row, in-memory client and lock, pending choice, and all files for this user."""
+    """Delete DB row, in-memory client and lock, pending choice, history, strikes, and all files for this user."""
     import shutil
     delete_user(chat_id)
     clear_pending(chat_id)
+    clear_strikes(chat_id)
+    clear_hourly_calls(chat_id)
+    try:
+        try:
+            from app.llm.intent import clear_user_history
+        except ImportError:
+            from llm.intent import clear_user_history
+        clear_user_history(chat_id)
+    except Exception:
+        pass
     with _cache_lock:
         _client_cache.pop(chat_id, None)
         _client_locks.pop(chat_id, None)
@@ -300,3 +325,110 @@ def get_pending(chat_id: str):
 def clear_pending(chat_id: str):
     with _pending_lock:
         _pending_choices.pop(chat_id, None)
+
+
+# --- Strike tracking & Lockout ---
+
+_user_strikes: dict = {}
+_strikes_lock = threading.Lock()
+
+_user_hourly_calls: dict = {}
+_hourly_lock = threading.Lock()
+
+
+def clear_strikes(chat_id: str):
+    with _strikes_lock:
+        _user_strikes.pop(chat_id, None)
+
+
+def clear_hourly_calls(chat_id: str):
+    with _hourly_lock:
+        _user_hourly_calls.pop(chat_id, None)
+
+
+def record_strike(chat_id: str, strikes: int = 1, is_admin: bool = False) -> bool:
+    """
+    Record off-topic strike(s).
+    If strikes reach threshold within LLM_STRIKE_WINDOW_MIN, initiate lockout for LLM_LOCK_HOURS.
+    Returns True if a lockout just began, False otherwise.
+    """
+    admin_exempt = int(os.environ.get("LLM_ADMIN_EXEMPT", "1"))
+    if is_admin and admin_exempt:
+        return False
+
+    strike_threshold = int(os.environ.get("LLM_STRIKES", "2"))
+    window_sec = int(os.environ.get("LLM_STRIKE_WINDOW_MIN", "10")) * 60
+    lock_hours = int(os.environ.get("LLM_LOCK_HOURS", "2"))
+
+    now = time.time()
+    with _strikes_lock:
+        timestamps = _user_strikes.get(chat_id, [])
+        timestamps = [ts for ts in timestamps if now - ts < window_sec]
+        for _ in range(strikes):
+            timestamps.append(now)
+
+        if len(timestamps) >= strike_threshold:
+            _user_strikes.pop(chat_id, None)
+            locked_until = datetime.now(timezone.utc) + timedelta(hours=lock_hours)
+            upsert_user(chat_id, llm_locked_until=locked_until.isoformat())
+            log.warning("User %s locked out until %s", chat_id[-6:], locked_until.isoformat())
+            return True
+        else:
+            _user_strikes[chat_id] = timestamps
+            return False
+
+
+def is_llm_locked(chat_id: str, is_admin: bool = False) -> bool:
+    """Check if user is currently locked out from natural language chat."""
+    admin_exempt = int(os.environ.get("LLM_ADMIN_EXEMPT", "1"))
+    if is_admin and admin_exempt:
+        return False
+
+    user = get_user(chat_id)
+    if not user:
+        return False
+
+    locked_str = user.get("llm_locked_until")
+    if not locked_str:
+        return False
+
+    try:
+        locked_until = datetime.fromisoformat(locked_str)
+        if locked_until.tzinfo is None:
+            locked_until = locked_until.replace(tzinfo=timezone.utc)
+        if datetime.now(timezone.utc) < locked_until:
+            return True
+        else:
+            # Expired: clear lockout and strikes
+            upsert_user(chat_id, llm_locked_until=None)
+            clear_strikes(chat_id)
+            return False
+    except Exception:
+        upsert_user(chat_id, llm_locked_until=None)
+        return False
+
+
+def count_locked_users() -> int:
+    """Return count of users currently under active lockout."""
+    now_iso = datetime.now(timezone.utc).isoformat()
+    with _db_lock, _conn() as c:
+        row = c.execute("SELECT COUNT(*) FROM users WHERE llm_locked_until IS NOT NULL AND llm_locked_until > ?", (now_iso,)).fetchone()
+        return row[0] if row else 0
+
+
+def check_and_record_llm_limit(chat_id: str) -> bool:
+    """
+    Check if user exceeded LLM_USER_LIMIT_PER_HOUR (default 20).
+    Returns True if allowed (and records the call), False if limit reached.
+    """
+    limit = int(os.environ.get("LLM_USER_LIMIT_PER_HOUR", "20"))
+    now = time.time()
+    with _hourly_lock:
+        calls = _user_hourly_calls.get(chat_id, [])
+        calls = [ts for ts in calls if now - ts < 3600]
+        if len(calls) >= limit:
+            _user_hourly_calls[chat_id] = calls
+            return False
+        calls.append(now)
+        _user_hourly_calls[chat_id] = calls
+        return True

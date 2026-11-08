@@ -12,7 +12,7 @@ load_dotenv(Path(__file__).resolve().parent.parent / ".env")
 BRIDGE = os.environ.get("BRIDGE_URL", "http://127.0.0.1:3001")
 _TOKEN = os.environ.get("BRIDGE_TOKEN", "")
 
-log = logging.getLogger("sathi.wa_transport")
+log = logging.getLogger("taleemgo.wa_transport")
 
 _send_lock = threading.Lock()
 _last_send = 0.0
