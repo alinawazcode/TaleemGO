@@ -229,7 +229,7 @@ KEYWORDS = {
         "clo", "clos", "outcomes", "outcome", "سي ايل او", "سی ایل او",
     ],
     "grades": [
-        "grade", "grades", "mark", "marks", "گریڈ", "گريڊ", "مارکس", "مارڪس",
+        "grade", "grades", "marks", "nambar", "گریڈ", "گريڊ", "مارکس", "مارڪس",
     ],
     "help": [
         "help", "madad", "مدد", "هيلپ", "ہیلپ",

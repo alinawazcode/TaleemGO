@@ -14,14 +14,19 @@ WEEK_DIGIT_RE = re.compile(r"\b(?:week|wk|w|lecture|lec|l|hafta|hafto|hafte|هف
 STOP_WORDS = {
     # English
     "the", "a", "an", "of", "in", "to", "for", "is", "my", "me", "show", "give", "please", "what", "any", "how", "much",
+    "was", "were", "are", "am", "marked", "mark", "today", "yesterday", "tomorrow", "this", "that", "on", "at", "by", "check", "tell", "did", "do", "does",
     # Urdu/Hindi Latin
     "ka", "ki", "ke", "ko", "se", "par", "hai", "hain", "kya", "kitna", "kitni", "mera", "meri", "mere", "batao", "dikhao", "bhejo", "bhej", "do", "karo", "chahiye",
+    "aaj", "kal", "tha", "thi", "the", "lagi", "laga",
     # Urdu script
     "کا", "کی", "کے", "کو", "سے", "پر", "ہے", "ہیں", "کیا", "کتنا", "کتنی", "میرا", "میری", "میرے", "بتاؤ", "دکھاؤ", "بھیجو", "بھیج", "دو", "کرو", "چاہیے",
+    "آج", "لگی", "لگا",
     # Sindhi Latin
     "jo", "ji", "ja", "je", "te", "khaan", "aahe", "aahin", "chha", "ketri", "ketro", "munhinjo", "munhinji", "munhinja", "mukhay", "dekharo", "moklyo", "mokal", "diyo", "karyo",
+    "aj", "sabhani", "hui", "hua",
     # Sindhi script
     "جو", "جي", "جا", "جيڪو", "تي", "کان", "آهي", "آهن", "ڇا", "ڪيتري", "ڪيترو", "منهنجو", "منهنجي", "منهنجا", "مون", "کي", "ڏيکاريو", "موڪليو", "موڪل", "ڏيو", "ڪريو",
+    "اڄ", "سڀاڻي", "هئي", "هو",
 }
 
 SINDHI_SPECIFIC_CHARS = set("ٻڀٿٺٽڄڃڇڌڏڊڍڦڪڳڱڻ")
@@ -159,21 +164,47 @@ def match_rules(text: str, has_pending_download: bool = False, stored_lang: str 
     )
 
     number_words = ["number", "نمبر", "nambar"]
-    has_number_kw = any(w in norm_lower or w in folded_lower for w in number_words)
-    has_mere_or_course = any(
-        w in norm_lower or w in folded_lower
-        for w in (
-            "mere", "mera", "meri", "munhinja", "منهنجا", "میرے", "میرا",
-            "course", "subject", "kors", "کورس", "ڪورس", "mazmoon", "مضمون",
-        )
+
+    # Attendance keywords check
+    has_attendance = has_keyword(KEYWORDS["attendance"])
+
+    # Grades keywords check:
+    # - Latin-script keywords match as WHOLE WORDS only (regex \b)
+    # - Arabic-script keywords keep working as they do now (folded substring)
+    def has_grades_keyword():
+        grades_kws = KEYWORDS.get("grades", [])
+        latin_kws = [k for k in grades_kws if re.match(r"^[a-zA-Z]+$", k)]
+        arabic_kws = [k for k in grades_kws if not re.match(r"^[a-zA-Z]+$", k)]
+
+        for kw in latin_kws:
+            if re.search(r"\b" + re.escape(kw.lower()) + r"\b", norm_lower):
+                return True
+            if len(kw) >= 5:
+                for word in re.findall(r"\b[a-z]+\b", norm_lower):
+                    if len(word) >= 5 and _edit_distance_1(word, kw.lower()):
+                        return True
+
+        for ak in arabic_kws:
+            folded_ak = fold_arabic_script(ak).lower()
+            if folded_ak in folded_lower or ak.lower() in norm_lower:
+                return True
+
+        return False
+
+    # Number / nambar words with mere/course (whole words for Latin, Arabic substring)
+    has_number_kw = (
+        bool(re.search(r"\b(?:number|nambar)\b", norm_lower))
+        or ("نمبر" in folded_lower or "نمبر" in norm_lower)
+    )
+    has_mere_or_course = (
+        bool(re.search(r"\b(?:mere|mera|meri|munhinja|course|subject|kors|mazmoon)\b", norm_lower))
+        or any(w in folded_lower for w in ("منهنجا", "میرے", "میرا", "کورس", "ڪورس", "مضمون"))
     )
 
-    if has_keyword(KEYWORDS.get("grades", [])):
-        matched_intent = "grades"
-    elif has_number_kw and has_mere_or_course:
-        matched_intent = "grades"
-    elif has_keyword(KEYWORDS["attendance"]):
+    if has_attendance:
         matched_intent = "attendance"
+    elif has_grades_keyword() or (has_number_kw and has_mere_or_course):
+        matched_intent = "grades"
     elif has_keyword(KEYWORDS["clos"]):
         matched_intent = "clos"
     elif (week_num is not None and has_explicit_week) or has_keyword(KEYWORDS["files"]):

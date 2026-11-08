@@ -442,6 +442,54 @@ class TestNaturalLanguageGrades(BaseGradesTestCase):
         self.assertEqual(r7["actions"][0]["intent"], "grades")
         self.assertEqual(r7["actions"][0]["course_query"], "NLP")
 
+    def test_bug1_whole_word_matching_and_attendance_precedence(self):
+        """Bug 1: whole-word matching for grades/number/nambar, attendance precedence over grades, no inside-word matching."""
+        # 1. 'was my attendance marked today' -> attendance (no course)
+        r1 = match_rules("was my attendance marked today")
+        self.assertIsNotNone(r1)
+        self.assertEqual(r1["actions"][0]["intent"], "attendance")
+        self.assertNotIn("course_query", r1["actions"][0])
+
+        # 2. 'remark on my assignment' -> not grades
+        r2 = match_rules("remark on my assignment")
+        if r2 and r2.get("actions"):
+            self.assertNotEqual(r2["actions"][0]["intent"], "grades")
+
+        # 3. 'upgrade plan' -> not grades
+        r3 = match_rules("upgrade plan")
+        if r3 and r3.get("actions"):
+            self.assertNotEqual(r3["actions"][0]["intent"], "grades")
+        else:
+            self.assertIsNone(r3)
+
+        # 4. 'show my grade in NLP' -> grades
+        r4 = match_rules("show my grade in NLP")
+        self.assertEqual(r4["actions"][0]["intent"], "grades")
+        self.assertEqual(r4["actions"][0]["course_query"], "NLP")
+
+        # 5. 'NLP me mere marks kitne hain' -> grades
+        r5 = match_rules("NLP me mere marks kitne hain")
+        self.assertEqual(r5["actions"][0]["intent"], "grades")
+        self.assertEqual(r5["actions"][0]["course_query"], "NLP")
+
+        # 6. 'منهنجا NLP جا مارڪس ٻڌايو' -> grades
+        r6 = match_rules("منهنجا NLP جا مارڪس ٻڌايو")
+        self.assertEqual(r6["actions"][0]["intent"], "grades")
+        self.assertEqual(r6["actions"][0]["course_query"], "NLP")
+
+        # 7. 'mera number NLP me' -> grades
+        r7 = match_rules("mera number NLP me")
+        self.assertEqual(r7["actions"][0]["intent"], "grades")
+        self.assertEqual(r7["actions"][0]["course_query"], "NLP")
+
+        # 8. 'what is my GPA' -> unsupported
+        r8 = match_rules("what is my GPA")
+        self.assertTrue(r8.get("unsupported"))
+
+        # 9. 'fee kitni hai' -> unsupported
+        r9 = match_rules("fee kitni hai")
+        self.assertTrue(r9.get("unsupported"))
+
     def test_unsupported_retained_with_zero_strikes(self):
         """GPA, fee status, and timetables remain unsupported and cause 0 strikes."""
         for query in ["What is my GPA?", "fee status", "semester fee kitni hai", "timetable dekhao"]:
@@ -517,6 +565,74 @@ class TestMonitorGradeAlerts(BaseGradesTestCase):
         self.sent_texts.clear()
         wa_monitor.check_updates(user_info)
         self.assertEqual(len(self.sent_texts), 0, "Restarting bot must NOT send duplicate alerts")
+
+    def test_existing_user_no_alert_burst_and_subsequent_alerts(self):
+        """Saved state with seeded=True, no grades_seeded, 3 already-graded items gives 0 alerts on first cycle; then 1 new grade gives exactly 1 alert; restart does not repeat it."""
+        chat_id = "existing_user@c.us"
+        usr.upsert_user(chat_id, email="exist@test.com", status="active")
+        udir = usr.user_dir(chat_id)
+
+        # Pre-populate saved state on disk predating grades: seeded=True, no grades_seeded, grades={}
+        old_state = {
+            "seeded": True,
+            "resources": ["r1", "r2"],
+            "assignments": ["a1", "a2", "a3", "a4"],
+            "attendance": ["att1"],
+            "reminders_sent": [],
+            "grades": {},
+        }
+        save_state(old_state, udir)
+
+        # 3 already-graded items + 1 ungraded
+        assignments = [
+            {"id": "a1", "course_id": "c_nlp", "title": "HW 1", "max_marks": 10.0, "is_extra_credit": False, "include_in_total": True, "due_date": "2026-11-15T18:00:00Z"},
+            {"id": "a2", "course_id": "c_nlp", "title": "HW 2", "max_marks": 10.0, "is_extra_credit": False, "include_in_total": True, "due_date": "2026-11-16T18:00:00Z"},
+            {"id": "a3", "course_id": "c_nlp", "title": "HW 3", "max_marks": 10.0, "is_extra_credit": False, "include_in_total": True, "due_date": "2026-11-17T18:00:00Z"},
+            {"id": "a4", "course_id": "c_nlp", "title": "HW 4", "max_marks": 20.0, "is_extra_credit": False, "include_in_total": True, "due_date": "2026-11-18T18:00:00Z"},
+        ]
+        submissions = {
+            "a1": {"assignment_id": "a1", "grade": 10.0, "max_marks": 10.0, "file_name": "a1.pdf", "graded_at": "2026-11-01T00:00:00Z"},
+            "a2": {"assignment_id": "a2", "grade": 9.0, "max_marks": 10.0, "file_name": "a2.pdf", "graded_at": "2026-11-02T00:00:00Z"},
+            "a3": {"assignment_id": "a3", "grade": 8.0, "max_marks": 10.0, "file_name": "a3.pdf", "graded_at": "2026-11-03T00:00:00Z"},
+            "a4": {"assignment_id": "a4", "grade": None, "max_marks": 20.0, "file_name": "a4.pdf", "graded_at": None},
+        }
+        lms = MockLMSForGrades(assignments=assignments, submissions=submissions)
+        usr.set_client(chat_id, lms)
+        user_info = {"chat_id": chat_id, "email": "exist@test.com", "status": "active"}
+
+        # Cycle 1: First cycle for existing user with 3 already-graded items
+        self.sent_texts.clear()
+        wa_monitor.check_updates(user_info)
+
+        # Zero alerts sent!
+        self.assertEqual(len(self.sent_texts), 0, "Existing user must receive ZERO alerts on first cycle")
+        saved = load_state(udir)
+        self.assertTrue(saved.get("grades_seeded"), "grades_seeded must be True after first cycle")
+        self.assertEqual(len(saved["grades"]), 3)
+        self.assertIn("a1", saved["grades"])
+        self.assertIn("a2", saved["grades"])
+        self.assertIn("a3", saved["grades"])
+        self.assertNotIn("a4", saved["grades"])
+
+        # Cycle 2: One new grade posted (a4 graded 19/20)
+        lms._submissions["a4"]["grade"] = 19.0
+        lms._submissions["a4"]["feedback"] = "Well done"
+        self.sent_texts.clear()
+        wa_monitor.check_updates(user_info)
+
+        self.assertEqual(len(self.sent_texts), 1, "Exactly one alert for the new grade")
+        self.assertIn("New grade posted", self.sent_texts[0][1])
+        self.assertIn("HW 4: 19/20", self.sent_texts[0][1])
+
+        # Cycle 3: Restart (clear client cache, re-read state from disk)
+        with usr._cache_lock:
+            usr._client_cache.clear()
+        new_lms = MockLMSForGrades(assignments=assignments, submissions=submissions)
+        usr.set_client(chat_id, new_lms)
+
+        self.sent_texts.clear()
+        wa_monitor.check_updates(user_info)
+        self.assertEqual(len(self.sent_texts), 0, "Restarting bot must NOT repeat alerts")
 
 
 if __name__ == "__main__":
