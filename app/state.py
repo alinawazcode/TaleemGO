@@ -15,6 +15,7 @@ DEFAULT_STATE = {
     "assignments": [],
     "attendance": [],
     "reminders_sent": [],
+    "grades": {},
 }
 
 

@@ -22,7 +22,7 @@ sys.path.insert(0, os.path.dirname(__file__))
 load_dotenv(os.path.join(os.path.dirname(__file__), "..", ".env"))
 
 from courses import course_acronym, format_course_list, resolve_course  # noqa: E402
-from lms_client import LMSClient, LMSAuthExpired, LMSError             # noqa: E402
+from lms_client import LMSClient, LMSAuthExpired, LMSError, summarize_grades  # noqa: E402
 from timeutils import to_local                                          # noqa: E402
 import wa_transport as wa                                               # noqa: E402
 import users as usr                                                     # noqa: E402
@@ -79,6 +79,7 @@ ACTIVATION_PHRASES = [
 HELP = (
     "TaleemGo AI commands:\n"
     "courses\nassignments\nupcoming\n"
+    "grades [course]\n"
     "resources <course>\nattendance [course]\nclos <course>\n"
     "download <course> [week N | title]\n"
     "logout  — disconnect your account\n"
@@ -144,7 +145,24 @@ def _start_monitor():
 
 def _reply(chat_id: str, text: str):
     try:
-        wa.send_text(chat_id, text)
+        if len(text) <= 3500:
+            wa.send_text(chat_id, text)
+            return
+        chunks = []
+        cur = []
+        cur_len = 0
+        for line in text.split("\n"):
+            if cur_len + len(line) + 1 > 3500 and cur:
+                chunks.append("\n".join(cur))
+                cur = [line]
+                cur_len = len(line)
+            else:
+                cur.append(line)
+                cur_len += len(line) + 1
+        if cur:
+            chunks.append("\n".join(cur))
+        for ch in chunks:
+            wa.send_text(chat_id, ch)
     except Exception:
         log.exception("Failed to send reply to %s…", chat_id[-6:])
 
@@ -337,6 +355,115 @@ def _handle_clos_cmd(chat_id: str, lms, arg: str):
         _reply(chat_id, f"Which course?\n{options}\n\nReply with a number. Reply \"cancel\" to stop.")
 
 
+def _show_course_grades(chat_id: str, lms, course: dict):
+    course_grades = lms.get_grades(course["id"])
+    acr = course_acronym(course.get("name", ""))
+    label = f"{acr} ({course['code']})" if acr else course["code"]
+    lines = [f"{label} Grades:"]
+    if not course_grades:
+        lines.append("No grades posted yet")
+    else:
+        for it in course_grades:
+            g = it.get("grade")
+            mm = it.get("max_marks")
+            if g is not None:
+                g_str = f"{int(g)}" if isinstance(g, (int, float)) and g == int(g) else f"{g:g}"
+                if mm is not None:
+                    mm_str = f"{int(mm)}" if isinstance(mm, (int, float)) and mm == int(mm) else f"{mm:g}"
+                    mark_str = f"{g_str}/{mm_str}"
+                else:
+                    mark_str = g_str
+            else:
+                mark_str = "Not graded yet"
+            line = f"{it['title']}: {mark_str}"
+            fb = (it.get("feedback") or "").strip()
+            if fb:
+                line += f"\n  Feedback: {fb[:150]}"
+            lines.append(line)
+
+        summary = summarize_grades(course_grades)
+        if summary["graded"] == 0:
+            lines.append("No grades posted yet")
+        else:
+            ob = summary["obtained"]
+            mt = summary["max_total"]
+            ob_str = f"{int(ob)}" if ob == int(ob) else f"{ob:g}"
+            mt_str = f"{int(mt)}" if mt == int(mt) else f"{mt:g}"
+            lines.append(f"Graded so far: {ob_str}/{mt_str} ({summary['graded']} of {summary['total']} graded)")
+
+    _reply(chat_id, "\n".join(lines))
+
+
+def _handle_grades_cmd(chat_id: str, lms, arg: str = ""):
+    courses = lms.get_courses()
+    if not courses:
+        _reply(chat_id, "No courses found.")
+        return
+
+    arg = (arg or "").strip()
+    if not arg:
+        blocks = []
+        for c in courses:
+            acr = course_acronym(c.get("name", ""))
+            label = f"{acr} ({c['code']})" if acr else c["code"]
+            c_grades = lms.get_grades(c["id"])
+            c_lines = [f"{label}:"]
+            if not c_grades:
+                c_lines.append("No grades posted yet")
+            else:
+                for it in c_grades:
+                    g = it.get("grade")
+                    mm = it.get("max_marks")
+                    if g is not None:
+                        g_str = f"{int(g)}" if isinstance(g, (int, float)) and g == int(g) else f"{g:g}"
+                        if mm is not None:
+                            mm_str = f"{int(mm)}" if isinstance(mm, (int, float)) and mm == int(mm) else f"{mm:g}"
+                            mark_str = f"{g_str}/{mm_str}"
+                        else:
+                            mark_str = g_str
+                    else:
+                        mark_str = "Not graded yet"
+                    c_lines.append(f"{it['title']}: {mark_str}")
+
+                summary = summarize_grades(c_grades)
+                if summary["graded"] == 0:
+                    c_lines.append("No grades posted yet")
+                else:
+                    ob = summary["obtained"]
+                    mt = summary["max_total"]
+                    ob_str = f"{int(ob)}" if ob == int(ob) else f"{ob:g}"
+                    mt_str = f"{int(mt)}" if mt == int(mt) else f"{mt:g}"
+                    c_lines.append(f"Graded so far: {ob_str}/{mt_str} ({summary['graded']} of {summary['total']} graded)")
+            blocks.append("\n".join(c_lines))
+        chunks = []
+        cur_chunk = []
+        cur_len = 0
+        for b in blocks:
+            b_len = len(b) + (2 if cur_chunk else 0)
+            if cur_chunk and (cur_len + b_len > 3500):
+                chunks.append("\n\n".join(cur_chunk))
+                cur_chunk = [b]
+                cur_len = len(b)
+            else:
+                cur_chunk.append(b)
+                cur_len += b_len
+        if cur_chunk:
+            chunks.append("\n\n".join(cur_chunk))
+        for ch in chunks:
+            _reply(chat_id, ch)
+        return
+
+    matches = resolve_course(lms, arg)
+    if not matches:
+        _reply(chat_id, "I couldn't find that course. Your courses:\n" + format_course_list(courses))
+    elif len(matches) == 1:
+        _show_course_grades(chat_id, lms, matches[0])
+    else:
+        options = "\n".join(f"{i}. {c.get('code')} {c.get('name')}" for i, c in enumerate(matches, 1))
+        usr.set_pending(chat_id, {"type": "course", "courses": matches, "command": "grades", "extra": ""})
+        _reply(chat_id, f"Which course?\n{options}\n\nReply with a number. Reply \"cancel\" to stop.")
+
+
 def _send_files_choice(chat_id: str, lms, files: list, indices: list = None):
     if indices is None:
         to_send = files[:10]  # maximum 10 files per request
@@ -500,6 +627,8 @@ def _execute_course_command(chat_id: str, lms, cmd: str, course: dict, extra: st
         _show_course_clos(chat_id, lms, course)
     elif cmd == "download":
         _handle_download_for_course(chat_id, lms, course, extra)
+    elif cmd == "grades":
+        _show_course_grades(chat_id, lms, course)
 
 
 def _handle_pending(chat_id: str, lms, pending: dict, text: str) -> bool:
@@ -753,6 +882,8 @@ def _dispatch_exact_cmd(chat_id: str, lms, word: str, arg: str):
         _handle_download_cmd(chat_id, lms, arg)
     elif word == "attendance":
         _handle_attendance_cmd(chat_id, lms, arg)
+    elif word in ("grades", "grade"):
+        _handle_grades_cmd(chat_id, lms, arg)
     elif word == "resources":
         _handle_resources_cmd(chat_id, lms, arg)
     elif word == "clos":
@@ -826,6 +957,9 @@ def _execute_action(chat_id: str, lms, act: dict, lang: str):
         _reply(chat_id, cmd_assignments(lms))
     elif intent == "upcoming":
         _reply(chat_id, cmd_upcoming(lms))
+    elif intent == "grades":
+        cq = act.get("course_query", "")
+        _handle_grades_cmd(chat_id, lms, cq)
     elif intent == "help":
         _reply(chat_id, t("help", lang))
     elif intent == "attendance":
@@ -983,7 +1117,7 @@ def _handle_natural_language(chat_id: str, text: str, user: dict, lms):
         actions = actions[1:]
 
     has_lms_action = any(
-        a.get("intent") in ("courses", "assignments", "upcoming", "resources", "attendance", "clos", "download")
+        a.get("intent") in ("courses", "assignments", "upcoming", "resources", "attendance", "clos", "download", "grades")
         for a in actions
     )
     if has_lms_action:
@@ -1016,7 +1150,7 @@ def _handle_active(chat_id: str, text: str, user: dict):
     word = word.lower().lstrip("/")
     arg = arg.strip()
 
-    exact_cmds = {"download", "dl", "attendance", "resources", "clos", "courses", "assignments", "upcoming"}
+    exact_cmds = {"download", "dl", "attendance", "resources", "clos", "courses", "assignments", "upcoming", "grades", "grade"}
     if word in exact_cmds:
         try:
             _dispatch_exact_cmd(chat_id, lms, word, arg)

@@ -96,6 +96,10 @@ class FakeLMSClient:
             return fpath
         return f"/fake/path/{resource_id}.pdf"
 
+    def get_grades(self, course_id=None):
+        self.called.append(f"get_grades:{course_id}")
+        return []
+
 
 class FakeExpiredClient(FakeLMSClient):
     def get_courses(self):

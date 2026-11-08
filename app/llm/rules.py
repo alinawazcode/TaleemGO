@@ -158,7 +158,21 @@ def match_rules(text: str, has_pending_download: bool = False, stored_lang: str 
         for w in ("week", "wk", "hafta", "hafto", "hafte", "هفتو", "هفتي", "ہفتہ", "ہفتے", "lecture", "lec", "ليڪچر", "لیکچر")
     )
 
-    if has_keyword(KEYWORDS["attendance"]):
+    number_words = ["number", "نمبر", "nambar"]
+    has_number_kw = any(w in norm_lower or w in folded_lower for w in number_words)
+    has_mere_or_course = any(
+        w in norm_lower or w in folded_lower
+        for w in (
+            "mere", "mera", "meri", "munhinja", "منهنجا", "میرے", "میرا",
+            "course", "subject", "kors", "کورس", "ڪورس", "mazmoon", "مضمون",
+        )
+    )
+
+    if has_keyword(KEYWORDS.get("grades", [])):
+        matched_intent = "grades"
+    elif has_number_kw and has_mere_or_course:
+        matched_intent = "grades"
+    elif has_keyword(KEYWORDS["attendance"]):
         matched_intent = "attendance"
     elif has_keyword(KEYWORDS["clos"]):
         matched_intent = "clos"
@@ -181,7 +195,7 @@ def match_rules(text: str, has_pending_download: bool = False, stored_lang: str 
 
     # 4. Extract course_query candidates
     course_query = None
-    if matched_intent in ("attendance", "download", "resources", "clos"):
+    if matched_intent in ("attendance", "download", "resources", "clos", "grades"):
         # Remove matched keywords, week digits, ordinals, and stop words
         tokens = re.findall(r"[A-Za-z0-9\u0600-\u06FF]+", clean_text)
         candidates = []
@@ -190,6 +204,7 @@ def match_rules(text: str, has_pending_download: bool = False, stored_lang: str 
             "هفتو", "هفتي", "ہفتہ", "ہفتے", "لیکچر", "ليڪچر"
         }
         kw_words = {w for kws in KEYWORDS.values() for kw in kws for w in kw.lower().split()}
+        kw_words.update(number_words)
         folded_kw_words = {fold_arabic_script(w) for w in kw_words}
 
         for t in tokens:

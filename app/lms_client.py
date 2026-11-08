@@ -272,10 +272,46 @@ class LMSClient:
     def get_submissions(self):
         rows = self._get(
             "assignment_submissions",
-            select="assignment_id,file_name,submitted_at,grade",
+            select="assignment_id,file_name,submitted_at,grade,graded_at,feedback",
             student_id=f"eq.{self.student_id}",
         )
         return {r["assignment_id"]: r for r in rows}
+
+    def get_grades(self, course_id=None):
+        assignments = self.get_assignments(course_id)
+        submissions = self.get_submissions()
+        out = []
+        for a in assignments:
+            sub = submissions.get(a["id"])
+            raw_grade = sub.get("grade") if sub else None
+            grade = None
+            if raw_grade is not None:
+                try:
+                    grade = float(raw_grade)
+                except (ValueError, TypeError):
+                    grade = None
+
+            max_marks = a.get("max_marks")
+            if max_marks is not None:
+                try:
+                    max_marks = float(max_marks)
+                except (ValueError, TypeError):
+                    pass
+
+            out.append({
+                "id": a["id"],
+                "course_id": a.get("course_id"),
+                "title": a.get("title", ""),
+                "week_number": a.get("week_number"),
+                "max_marks": max_marks,
+                "is_extra_credit": bool(a.get("is_extra_credit")),
+                "include_in_total": a.get("include_in_total") is not False,
+                "grade": grade,
+                "graded_at": sub.get("graded_at") if sub else None,
+                "feedback": sub.get("feedback") if sub else None,
+                "submitted": bool(sub),
+            })
+        return out
 
     def get_assignments_with_status(self, course_id=None):
         assignments = self.get_assignments(course_id)
@@ -381,6 +417,39 @@ class LMSClient:
         client = cls(email=email, password=password, token_file=token_file)
         client.login()          # raises HTTPError on 400/401
         return client
+
+
+def summarize_grades(items):
+    """
+    Summarize raw marks for a list of grade items.
+    Returns {graded, total, obtained, max_total}.
+
+    Note: The LMS has no category weights or grade scales configured;
+    this is a plain marks total (obtained / max_total), not an official or weighted course grade.
+    """
+    total = len(items)
+    graded = 0
+    obtained = 0.0
+    max_total = 0.0
+    for it in items:
+        grade = it.get("grade")
+        if grade is not None:
+            graded += 1
+            if it.get("include_in_total") is not False:
+                obtained += float(grade)
+                if not it.get("is_extra_credit"):
+                    mm = it.get("max_marks")
+                    if mm is not None:
+                        try:
+                            max_total += float(mm)
+                        except (ValueError, TypeError):
+                            pass
+    return {
+        "graded": graded,
+        "total": total,
+        "obtained": round(obtained, 2),
+        "max_total": round(max_total, 2),
+    }
 
 
 if __name__ == "__main__":

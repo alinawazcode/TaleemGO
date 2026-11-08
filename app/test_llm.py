@@ -117,9 +117,21 @@ class FakeLMSClient:
         p.write_bytes(b"%PDF-fake")
         return str(p)
 
+    def get_grades(self, course_id=None):
+        self.called.append(f"get_grades:{course_id}")
+        return [
+            {"id": "a1", "course_id": "c_nlp", "title": "Homework 1", "week_number": 1,
+             "max_marks": 10.0, "is_extra_credit": False, "include_in_total": True,
+             "grade": 8.5, "graded_at": "2026-11-01T10:00:00Z", "feedback": "Good job", "submitted": True},
+            {"id": "a2", "course_id": "c_nlp", "title": "Project Phase 1", "week_number": 3,
+             "max_marks": 20.0, "is_extra_credit": False, "include_in_total": True,
+             "grade": None, "graded_at": None, "feedback": None, "submitted": False},
+        ]
+
 
 class LLMBaseTestCase(unittest.TestCase):
     def setUp(self):
+        self.orig_env = os.environ.copy()
         self.tmp = Path(tempfile.mkdtemp(prefix="taleemgo_test_"))
         usr.USERS_DIR = self.tmp / "users"
         usr.DB_PATH = self.tmp / "users.db"
@@ -174,6 +186,8 @@ class LLMBaseTestCase(unittest.TestCase):
         wa_bot.wa.send_text = self.orig_send_text
         wa_bot.wa.send_file = self.orig_send_file
         shutil.rmtree(self.tmp, ignore_errors=True)
+        os.environ.clear()
+        os.environ.update(self.orig_env)
 
 
 class TestFailoverAndParsing(LLMBaseTestCase):
@@ -869,52 +883,81 @@ class TestModelFailoverAndClassification(LLMBaseTestCase):
 class TestUnsupportedAndHelpFallback(LLMBaseTestCase):
     @patch("app.llm.router.call_chat_completions")
     def test_unsupported_requests_all_languages_no_strikes(self, mock_call):
-        """Unsupported requests (grades, marks, fees, timetable) in English, Urdu, Sindhi, Roman return info with 0 strikes."""
+        """Unsupported requests (GPA, fees, timetable, datesheet) in English, Urdu, Sindhi, Roman return info with 0 strikes."""
         mock_call.return_value = '{"lang": "en", "actions": [], "clarify": null, "off_topic": false, "unsupported": true}'
         chat_id = "student_grades@c.us"
         usr.upsert_user(chat_id, email="sg@test.com", status="active")
         lms = FakeLMSClient("sg@test.com")
         usr.set_client(chat_id, lms)
 
-        # 1. English
+        # 1. English GPA
         self.sent_texts.clear()
-        wa_bot.handle(chat_id, "Show my grade in NLP")
+        wa_bot.handle(chat_id, "What is my GPA?")
         self.assertFalse(usr.is_llm_locked(chat_id))
         self.assertTrue(any("I can't do that yet" in txt for _, txt in self.sent_texts))
 
-        # 2. Roman Urdu (offline rules or mock)
+        # 2. Roman Urdu fee
         self.sent_texts.clear()
         mock_call.return_value = '{"lang": "ur", "actions": [], "clarify": null, "off_topic": false, "unsupported": true}'
-        wa_bot.handle(chat_id, "mera NLP ka grade batao")
+        wa_bot.handle(chat_id, "fee kitni hai")
         self.assertFalse(usr.is_llm_locked(chat_id))
         self.assertTrue(any("میں ابھی یہ نہیں کر سکتا" in txt or "I can't do that yet" in txt for _, txt in self.sent_texts))
 
         # 3. Urdu script
         self.sent_texts.clear()
         mock_call.return_value = '{"lang": "ur", "actions": [], "clarify": null, "off_topic": false, "unsupported": true}'
-        wa_bot.handle(chat_id, "میرا این ایل پی کا گریڈ دکھاؤ")
+        wa_bot.handle(chat_id, "سمسٹر کی فیس کتنی ہے؟")
         self.assertFalse(usr.is_llm_locked(chat_id))
         self.assertTrue(any("میں ابھی یہ نہیں کر سکتا" in txt for _, txt in self.sent_texts))
 
         # 4. Sindhi script
         self.sent_texts.clear()
         mock_call.return_value = '{"lang": "sd", "actions": [], "clarify": null, "off_topic": false, "unsupported": true}'
-        wa_bot.handle(chat_id, "منهنجو NLP جو گريڊ ڏيکاريو")
+        wa_bot.handle(chat_id, "منهنجي فيس ڪيتري آهي؟")
         self.assertFalse(usr.is_llm_locked(chat_id))
         self.assertTrue(any("مان اڃا اهو نٿو ڪري سگهان" in txt for _, txt in self.sent_texts))
 
     @patch("app.llm.router.call_chat_completions")
+    def test_grades_natural_language_supported_no_strikes(self, mock_call):
+        """'show my grade in NLP' is recognized as grades intent, replies with grades, and never strikes."""
+        mock_call.return_value = '{"lang": "en", "actions": [{"intent": "grades", "course_query": "NLP"}], "clarify": null, "off_topic": false, "unsupported": false}'
+        chat_id = "grades_nl@c.us"
+        usr.upsert_user(chat_id, email="gnl@test.com", status="active")
+        lms = FakeLMSClient("gnl@test.com")
+        usr.set_client(chat_id, lms)
+
+        # 1. English
+        self.sent_texts.clear()
+        wa_bot.handle(chat_id, "Show my grade in NLP")
+        self.assertFalse(usr.is_llm_locked(chat_id))
+        self.assertTrue(any("Homework 1: 8.5/10" in txt for _, txt in self.sent_texts))
+
+        # 2. Roman Urdu
+        self.sent_texts.clear()
+        mock_call.return_value = '{"lang": "ur-roman", "actions": [{"intent": "grades", "course_query": "NLP"}], "clarify": null, "off_topic": false, "unsupported": false}'
+        wa_bot.handle(chat_id, "NLP me mere marks kitne hain")
+        self.assertFalse(usr.is_llm_locked(chat_id))
+        self.assertTrue(any("Homework 1: 8.5/10" in txt for _, txt in self.sent_texts))
+
+        # 3. Sindhi script
+        self.sent_texts.clear()
+        mock_call.return_value = '{"lang": "sd", "actions": [{"intent": "grades", "course_query": "NLP"}], "clarify": null, "off_topic": false, "unsupported": false}'
+        wa_bot.handle(chat_id, "منهنجا NLP جا مارڪس ٻڌايو")
+        self.assertFalse(usr.is_llm_locked(chat_id))
+        self.assertTrue(any("Homework 1: 8.5/10" in txt for _, txt in self.sent_texts))
+
+    @patch("app.llm.router.call_chat_completions")
     def test_unsupported_rescued_from_off_topic_no_strikes(self, mock_call):
-        """Even if model flags 'Show my grade in NLP' as off_topic, rules rescue it to unsupported with 0 strikes."""
+        """Even if model flags 'fee kitni hai' as off_topic, rules rescue it to unsupported with 0 strikes."""
         mock_call.return_value = '{"lang": "en", "actions": [], "clarify": null, "off_topic": true, "unsupported": false}'
         chat_id = "grade_rescue@c.us"
         usr.upsert_user(chat_id, email="gr@test.com", status="active")
         lms = FakeLMSClient("gr@test.com")
         usr.set_client(chat_id, lms)
 
-        wa_bot.handle(chat_id, "Show my grade in NLP")
+        wa_bot.handle(chat_id, "fee kitni hai")
         self.assertFalse(usr.is_llm_locked(chat_id))
-        self.assertTrue(any("I can't do that yet" in txt for _, txt in self.sent_texts))
+        self.assertTrue(any("I can't do that yet" in txt or "میں ابھی یہ نہیں کر سکتا" in txt for _, txt in self.sent_texts))
 
     def test_not_understood_and_busy_throttled_2_minutes(self):
         """Unrecognized message gets not_understood/busy and is throttled to once per 2 minutes."""

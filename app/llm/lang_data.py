@@ -228,6 +228,9 @@ KEYWORDS = {
     "clos": [
         "clo", "clos", "outcomes", "outcome", "سي ايل او", "سی ایل او",
     ],
+    "grades": [
+        "grade", "grades", "mark", "marks", "گریڈ", "گريڊ", "مارکس", "مارڪس",
+    ],
     "help": [
         "help", "madad", "مدد", "هيلپ", "ہیلپ",
     ],
@@ -237,17 +240,17 @@ KEYWORDS = {
     ],
 }
 
-# --- LMS-related but unsupported request keywords (grades, marks, timetable, fees, etc.) ---
+# --- LMS-related but unsupported request keywords (GPA, timetable, fees, etc.) ---
 UNSUPPORTED_KEYWORDS = [
     # English
-    "grade", "grades", "marks", "result", "results", "gpa", "cgpa", "transcript",
+    "result", "results", "gpa", "cgpa", "transcript",
     "timetable", "schedule", "fee", "fees", "exam", "exams", "datesheet", "date sheet",
     # Urdu script
-    "نمبر", "گریڈ", "نتیجہ", "نتائج", "فیس", "امتحان", "امتحانات", "ڈیٹ شیٹ", "شیڈول",
+    "نتیجہ", "نتائج", "فیس", "امتحان", "امتحانات", "ڈیٹ شیٹ", "شیڈول",
     # Sindhi script
-    "نمبر", "گريڊ", "نتيچو", "نتيجا", "فيس", "امتحان", "امتحانن", "ڊيٽ شيٽ", "شيڊول",
+    "نتيچو", "نتيجا", "فيس", "امتحان", "امتحانن", "ڊيٽ شيٽ", "شيڊول",
     # Roman Urdu / Hindi / Sindhi
-    "number", "nataij", "natija", "marks", "gpa", "cgpa", "timetable", "fees", "fee",
+    "nataij", "natija", "gpa", "cgpa", "transcript", "timetable", "fees", "fee",
     "exam", "exams", "datesheet", "tareekh",
 ]
 
@@ -258,6 +261,7 @@ STRINGS = {
         "help": (
             "TaleemGo AI commands:\n"
             "courses\nassignments\nupcoming\n"
+            "grades [course]\n"
             "resources <course>\nattendance [course]\nclos <course>\n"
             "download <course> [week N | title]\n"
             "logout  — disconnect your account\n"
@@ -279,9 +283,13 @@ STRINGS = {
         "lock_notice": "Natural-language chat is paused for {hours} hours. You can still use commands:\n\n{help}",
         "busy": "TaleemGo AI is busy right now. Please use a command:\n\n{help}",
         "not_understood": "I didn't understand that. Please use a command:\n\n{help}",
-        "unsupported": "I can't do that yet. I can help with: attendance, assignments and deadlines, lectures and files, courses, CLOs:\n\n{help}",
+        "unsupported": "I can't do that yet. I can help with: grades and marks, attendance, assignments and deadlines, lectures and files, courses, CLOs:\n\n{help}",
         "use_logout": "To disconnect your account or delete your data, please send the command: logout",
         "cancel_ack": "Download cancelled.",
+        "not_graded_yet": "Not graded yet",
+        "no_grades_posted": "No grades posted yet",
+        "graded_so_far": "Graded so far: {obtained}/{max_total} ({graded} of {total} graded)",
+        "grades_heading": "{course} Grades",
     },
     "ur": {
         "help": (
@@ -289,6 +297,7 @@ STRINGS = {
             "courses\n"
             "assignments\n"
             "upcoming\n"
+            "grades [course]\n"
             "resources <course>\n"
             "attendance [course]\n"
             "clos <course>\n"
@@ -312,9 +321,13 @@ STRINGS = {
         "lock_notice": "عام بات چیت {hours} گھنٹوں کے لیے بند کر دی گئی ہے۔ آپ ابھی بھی کمانڈز استعمال کر سکتے ہیں:\n\n{help}",
         "busy": "TaleemGo AI اس وقت مصروف ہے۔ براہ کرم کمانڈ استعمال کریں:\n\n{help}",
         "not_understood": "مجھے سمجھ نہیں آیا۔ براہ کرم کمانڈ استعمال کریں:\n\n{help}",
-        "unsupported": "میں ابھی یہ نہیں کر سکتا۔ میں حاضری، اسائنمنٹس، ڈیڈ لائنز، لیکچرز اور فائلز، کورسز اور CLOs میں مدد کر سکتا ہوں:\n\n{help}",
+        "unsupported": "میں ابھی یہ نہیں کر سکتا۔ میں گریڈز اور مارکس، حاضری، اسائنمنٹس، ڈیڈ لائنز، لیکچرز اور فائلز، کورسز اور CLOs میں مدد کر سکتا ہوں:\n\n{help}",
         "use_logout": "اپنا اکاؤنٹ ہٹانے یا ڈیٹا ڈیلیٹ کرنے کے لیے یہ کمانڈ بھیجیں: logout",
         "cancel_ack": "ڈاؤنلوڈ منسوخ کر دیا گیا۔",
+        "not_graded_yet": "ابھی تک گریڈ نہیں ہوا",
+        "no_grades_posted": "ابھی تک کوئی گریڈ جاری نہیں ہوا",
+        "graded_so_far": "اب تک کے گریڈ: {obtained}/{max_total} ({total} میں سے {graded} گریڈ ہو چکے)",
+        "grades_heading": "{course} گریڈز",
     },
     "sd": {
         "help": (
@@ -322,6 +335,7 @@ STRINGS = {
             "courses\n"
             "assignments\n"
             "upcoming\n"
+            "grades [course]\n"
             "resources <course>\n"
             "attendance [course]\n"
             "clos <course>\n"
@@ -345,9 +359,13 @@ STRINGS = {
         "lock_notice": "ڳالهه ٻولهه {hours} ڪلاڪن لاءِ معطل ڪئي وئي آهي. توهان هي ڪمانڊز اڃا به استعمال ڪري سگهو ٿا:\n\n{help}",
         "busy": "TaleemGo AI هن وقت مصروف آهي. مهرباني ڪري ڪمانڊ استعمال ڪريو:\n\n{help}",
         "not_understood": "مون کي اها ڳالهه سمجهه ۾ نه آئي. مهرباني ڪري ڪمانڊ استعمال ڪريو:\n\n{help}",
-        "unsupported": "مان اڃا اهو نٿو ڪري سگهان. مان حاضري، اسائنمينٽس ۽ آخري تاريخون، ليڪچرز ۽ فائيل، ڪورسز، ۽ CLOs ۾ مدد ڪري سگهان ٿو:\n\n{help}",
+        "unsupported": "مان اڃا اهو نٿو ڪري سگهان. مان گريڊ ۽ مارڪس، حاضري، اسائنمينٽس ۽ آخري تاريخون، ليڪچرز ۽ فائيل، ڪورسز، ۽ CLOs ۾ مدد ڪري سگهان ٿو:\n\n{help}",
         "use_logout": "پنهنجو کاتو ختم ڪرڻ يا ڊيٽا مٽائڻ لاءِ، مهرباني ڪري هي ڪمانڊ موڪليو: logout",
         "cancel_ack": "ڊائونلوڊ رد ڪيو ويو.",
+        "not_graded_yet": "اڃا گريڊ نه ٿيو آهي",
+        "no_grades_posted": "اڃا ڪو گريڊ پوسٽ نه ٿيو آهي",
+        "graded_so_far": "هاڻي تائين جا گريڊ: {obtained}/{max_total} ({total} مان {graded} گريڊ ٿيل)",
+        "grades_heading": "{course} گريڊ",
     },
 }
 
@@ -424,9 +442,22 @@ FEW_SHOT_EXAMPLES = [
         "input": {"user_message": "all", "has_pending_download": True, "stored_lang": "en"},
         "output": {"lang": "en", "actions": [{"intent": "choose", "all": True}], "clarify": None, "off_topic": False, "unsupported": False}
     },
-    # Unsupported LMS request (grades, marks, timetable, fees, etc.)
+    # Positive: Grades examples
     {
-        "input": {"user_message": "Show my grade in NLP", "has_pending_download": False, "stored_lang": "en"},
+        "input": {"user_message": "show my grade in NLP", "has_pending_download": False, "stored_lang": "en"},
+        "output": {"lang": "en", "actions": [{"intent": "grades", "course_query": "NLP"}], "clarify": None, "off_topic": False, "unsupported": False}
+    },
+    {
+        "input": {"user_message": "NLP me mere marks kitne hain", "has_pending_download": False, "stored_lang": "ur-roman"},
+        "output": {"lang": "ur-roman", "actions": [{"intent": "grades", "course_query": "NLP"}], "clarify": None, "off_topic": False, "unsupported": False}
+    },
+    {
+        "input": {"user_message": "منهنجا NLP جا مارڪس ٻڌايو", "has_pending_download": False, "stored_lang": "sd"},
+        "output": {"lang": "sd", "actions": [{"intent": "grades", "course_query": "NLP"}], "clarify": None, "off_topic": False, "unsupported": False}
+    },
+    # Unsupported LMS request (GPA, timetable, fees, etc.)
+    {
+        "input": {"user_message": "What is my current GPA?", "has_pending_download": False, "stored_lang": "en"},
         "output": {"lang": "en", "actions": [], "clarify": None, "off_topic": False, "unsupported": True}
     },
     # Negative: Off-Topic / Jailbreak Examples (output off_topic: true)
@@ -468,6 +499,10 @@ def select_few_shot_examples(user_text: str = "", has_pending_download: bool = F
     has_arabic_script = bool(re.search(r"[\u0600-\u06FF]", user_text or ""))
     is_arabic_lang = lang in ("ur", "sd")
 
+    # Check if user query looks like a grade/marks query
+    user_lower = (user_text or "").lower()
+    is_grades_query = any(w in user_lower for w in ("grade", "grades", "mark", "marks", "نمبر", "گریڈ", "گريڊ"))
+
     positives = []
     if has_arabic_script or is_arabic_lang:
         # Arabic script (Urdu / Sindhi)
@@ -478,9 +513,9 @@ def select_few_shot_examples(user_text: str = "", has_pending_download: bool = F
             # Urdu upcoming
             {"input": {"user_message": "کل کوئی اسائنمنٹ جمع کروانی ہے؟", "has_pending_download": False, "stored_lang": "ur"},
              "output": {"lang": "ur", "actions": [{"intent": "upcoming"}], "clarify": None, "off_topic": False, "unsupported": False}},
-            # Sindhi attendance
-            {"input": {"user_message": "منهنجي NLP جي حاضري ڪيتري آهي؟", "has_pending_download": False, "stored_lang": "sd"},
-             "output": {"lang": "sd", "actions": [{"intent": "attendance", "course_query": "NLP"}], "clarify": None, "off_topic": False, "unsupported": False}},
+            # Sindhi grades or attendance
+            {"input": {"user_message": "منهنجا NLP جا مارڪس ٻڌايو" if is_grades_query else "منهنجي NLP جي حاضري ڪيتري آهي؟", "has_pending_download": False, "stored_lang": "sd"},
+             "output": {"lang": "sd", "actions": [{"intent": "grades" if is_grades_query else "attendance", "course_query": "NLP"}], "clarify": None, "off_topic": False, "unsupported": False}},
             # Sindhi download
             {"input": {"user_message": "HCI جي پهرين هفتي جا سلائيڊس موڪليو", "has_pending_download": False, "stored_lang": "sd"},
              "output": {"lang": "sd", "actions": [{"intent": "download", "course_query": "HCI", "week": 1}], "clarify": None, "off_topic": False, "unsupported": False}},
@@ -488,15 +523,15 @@ def select_few_shot_examples(user_text: str = "", has_pending_download: bool = F
     else:
         # Latin script (English / Roman Urdu / Roman Sindhi)
         positives = [
-            # English attendance
-            {"input": {"user_message": "What is my attendance in NLP?", "has_pending_download": False, "stored_lang": "en"},
-             "output": {"lang": "en", "actions": [{"intent": "attendance", "course_query": "NLP"}], "clarify": None, "off_topic": False, "unsupported": False}},
+            # English attendance or grades
+            {"input": {"user_message": "show my grade in NLP" if is_grades_query else "What is my attendance in NLP?", "has_pending_download": False, "stored_lang": "en"},
+             "output": {"lang": "en", "actions": [{"intent": "grades" if is_grades_query else "attendance", "course_query": "NLP"}], "clarify": None, "off_topic": False, "unsupported": False}},
             # English download
             {"input": {"user_message": "Send me HCI week 1 slides please", "has_pending_download": False, "stored_lang": "en"},
              "output": {"lang": "en", "actions": [{"intent": "download", "course_query": "HCI", "week": 1}], "clarify": None, "off_topic": False, "unsupported": False}},
-            # Roman Urdu attendance
-            {"input": {"user_message": "mera NLP ka attendance kitna hai", "has_pending_download": False, "stored_lang": "ur-roman"},
-             "output": {"lang": "ur-roman", "actions": [{"intent": "attendance", "course_query": "NLP"}], "clarify": None, "off_topic": False, "unsupported": False}},
+            # Roman Urdu grades or attendance
+            {"input": {"user_message": "NLP me mere marks kitne hain" if is_grades_query else "mera NLP ka attendance kitna hai", "has_pending_download": False, "stored_lang": "ur-roman"},
+             "output": {"lang": "ur-roman", "actions": [{"intent": "grades" if is_grades_query else "attendance", "course_query": "NLP"}], "clarify": None, "off_topic": False, "unsupported": False}},
             # Roman Sindhi download
             {"input": {"user_message": "HCI jo pehrio hafto moklyo", "has_pending_download": False, "stored_lang": "sd-roman"},
              "output": {"lang": "sd-roman", "actions": [{"intent": "download", "course_query": "HCI", "week": 1}], "clarify": None, "off_topic": False, "unsupported": False}},
@@ -520,7 +555,7 @@ def select_few_shot_examples(user_text: str = "", has_pending_download: bool = F
 
     # 1 unsupported LMS example
     unsupported_ex = [
-        {"input": {"user_message": "Show my grade in NLP", "has_pending_download": False, "stored_lang": "en"},
+        {"input": {"user_message": "What is my current GPA?", "has_pending_download": False, "stored_lang": "en"},
          "output": {"lang": "en", "actions": [], "clarify": None, "off_topic": False, "unsupported": True}}
     ]
 

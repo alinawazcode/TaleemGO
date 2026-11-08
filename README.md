@@ -77,6 +77,7 @@ Scan the QR code with WhatsApp on the linked phone → Linked Devices → Link a
 | `courses` | List your enrolled courses |
 | `upcoming` | Pending assignments with deadlines |
 | `assignments` | All assignments with status |
+| `grades [course]` | Assignment marks and feedback |
 | `attendance [course]` | Overall or per-course attendance |
 | `resources <course>` | Lecture resources by week |
 | `clos <course>` | Course Learning Outcomes |
@@ -139,7 +140,7 @@ TaleemGo AI uses free OpenAI-compatible APIs in an automatic failover chain:
 ### Off-Topic Policy, Unsupported Requests & Lockout
 
 TaleemGo AI is an academic LMS assistant, not a general-purpose chatbot.
-- **Unsupported LMS Requests**: Requests about university life that TaleemGo AI does not support (grades, marks, GPA, exam results, transcript, timetable, schedule, tuition fees) receive a helpful message explaining what is currently supported (`attendance`, `assignments`, `upcoming`, `resources`, `clos`, `download`) with **zero strikes**.
+- **Unsupported LMS Requests**: Requests about university life that TaleemGo AI does not support (GPA, exam results, transcript, timetable, schedule, tuition fees) receive a helpful message explaining what is currently supported (`grades`, `attendance`, `assignments`, `upcoming`, `resources`, `clos`, `download`) with **zero strikes**.
 - **Silence on Off-Topic**: Non-university requests (jokes, general knowledge, coding help, role-play) receive silence (no response).
 - **Lockout Mechanism**: If a student sends 2 off-topic messages within 10 minutes (`LLM_STRIKES=2`, `LLM_STRIKE_WINDOW_MIN=10`), a 2-hour commands-only lockout is engaged (`LLM_LOCK_HOURS=2`). A jailbreak attempt triggers an instant 2-strike lockout.
 - **During Lockout**: Standard commands (`attendance NLP`, `download HCI week 1`, `courses`, `help`, `logout`) continue to function normally. Natural language processing is paused.
@@ -158,6 +159,7 @@ TaleemGo AI is an academic LMS assistant, not a general-purpose chatbot.
 
 - 📚 New lecture uploaded
 - 📝 New assignment posted
+- 📊 New grade posted (or updated)
 - ✅ Attendance marked
 - ⏰ Deadline reminder — 3 days before and 1 day before
 

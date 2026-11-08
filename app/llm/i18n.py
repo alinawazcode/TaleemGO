@@ -23,7 +23,7 @@ _db_path = None
 
 COMMAND_WORDS = {
     "courses", "assignments", "upcoming", "resources",
-    "attendance", "clos", "download", "logout", "login",
+    "attendance", "clos", "download", "logout", "login", "grades",
 }
 
 

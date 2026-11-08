@@ -25,6 +25,13 @@ def course_label(course):
     return f"{prefix}{course.get('code')} - {course.get('name')}"
 
 
+def course_grade_label(course):
+    if not course:
+        return "Unknown course"
+    acr = course_acronym(course.get("name", ""))
+    return f"{acr} ({course.get('code')})" if acr else str(course.get("code", ""))
+
+
 def check_updates(user: dict):
     """
     Run one monitor cycle for a single active user.
@@ -130,14 +137,56 @@ def _run_for_user(chat_id: str):
                 state["reminders_sent"] = list(sent)
                 save_state(state, udir)
 
+        # Grade alerts
+        grades = lms.get_grades()
+        seen_grades = dict(state.get("grades", {}))
+        for g_item in grades:
+            grade_val = g_item.get("grade")
+            if grade_val is None:
+                continue
+            aid_str = str(g_item["id"])
+            g_disp = f"{int(grade_val)}" if isinstance(grade_val, (int, float)) and grade_val == int(grade_val) else f"{grade_val:g}"
+            mm = g_item.get("max_marks")
+            if mm is not None:
+                mm_disp = f"{int(mm)}" if isinstance(mm, (int, float)) and mm == int(mm) else f"{mm:g}"
+                curr_str = f"{g_disp}/{mm_disp}"
+            else:
+                curr_str = g_disp
+
+            if aid_str not in seen_grades:
+                if not first_run:
+                    c = courses.get(g_item.get("course_id"))
+                    text = f"New grade posted\nCourse: {course_grade_label(c)}\n{g_item['title']}: {curr_str}"
+                    fb = (g_item.get("feedback") or "").strip()
+                    if fb:
+                        text += f"\nFeedback: {fb[:150]}"
+                    wa.send_text(chat_id, text)
+                seen_grades[aid_str] = curr_str
+                state["grades"] = seen_grades
+                save_state(state, udir)
+            else:
+                prev_str = seen_grades[aid_str]
+                if prev_str != curr_str:
+                    if not first_run:
+                        c = courses.get(g_item.get("course_id"))
+                        text = f"Updated: Grade posted\nCourse: {course_grade_label(c)}\n{g_item['title']}: {curr_str}"
+                        fb = (g_item.get("feedback") or "").strip()
+                        if fb:
+                            text += f"\nFeedback: {fb[:150]}"
+                        wa.send_text(chat_id, text)
+                    seen_grades[aid_str] = curr_str
+                    state["grades"] = seen_grades
+                    save_state(state, udir)
+
         state["resources"] = list(seen_res.union(r["id"] for r in resources))
         state["assignments"] = list(seen_asgn.union(a["id"] for a in assignments))
         state["attendance"] = list(seen_att.union(r["id"] for r in records))
         state["reminders_sent"] = list(sent)
+        state["grades"] = seen_grades
         if first_run:
             state["seeded"] = True
-            log.info("Seeded baseline for %s…: %d resources, %d assignments, %d attendance",
-                     chat_id[-6:], len(resources), len(assignments), len(records))
+            log.info("Seeded baseline for %s…: %d resources, %d assignments, %d attendance, %d grades",
+                     chat_id[-6:], len(resources), len(assignments), len(records), len(seen_grades))
         save_state(state, udir)
 
     except LMSAuthExpired:
