@@ -246,30 +246,54 @@ KEYWORDS = {
 }
 
 COURSE_FILLER_WORDS_LATIN = [
-    # Course / subject / class words
+    # General course & file filler words
     "course", "courses", "subject", "subjects", "class", "classes", "kors", "mazmoon",
-    # Resource & action words
-    "download", "dl", "lecture", "lectures", "lec", "slides", "slide", "file", "files", "notes", "note",
-    "bhejo", "bhej", "send", "give", "dikhao", "batao", "moklyo", "mokal", "diyo",
-    # Latest / recent words
+    "lecture", "lectures", "lec", "slides", "slide", "file", "files", "notes", "note",
+    # Part A words
     "latest", "newest", "recent", "last", "new",
     "naya", "nayi", "naye", "akhri", "aakhri", "lastest",
-    # Prepositions / connectors
-    "from", "of", "for", "in", "to", "the", "a", "an",
+    # Prepositions & stop words
+    "the", "a", "an", "from", "of", "for", "in", "to", "at", "on", "by", "with",
+    "is", "was", "were", "are", "am", "marked", "mark", "today", "yesterday", "tomorrow", "this", "that",
+    "my", "me", "i", "you", "tell", "check", "give", "show", "send", "download", "get", "please",
+    "what", "any", "how", "much", "many", "when", "did", "do", "does", "can",
+    # Intent keywords (stripped from course_query)
+    "attendance", "hazri", "haziri", "hazree", "haziree",
+    "grade", "grades", "marks", "nambar", "number",
+    "assignment", "assignments", "homework", "deadline", "deadlines", "due", "kam", "kaam",
+    "upcoming", "pending", "baqi", "baki",
+    "clo", "clos", "outcome", "outcomes",
+    "help", "madad",
+    # Urdu/Hindi Latin
     "ka", "ki", "ke", "ky", "ko", "se", "te", "par", "me", "mein",
-    "jo", "ji", "ja", "je", "khaan",
+    "mera", "meri", "mere", "kya", "kitna", "kitni", "hai", "hain",
+    "bhejo", "bhej", "do", "dena", "de", "karo", "karna", "chahiye", "dikhao", "batao",
+    "aaj", "kal", "tha", "thi", "the", "lagi", "laga", "wala", "wali", "wale",
+    # Sindhi Latin
+    "munhinjo", "munhinji", "munhinja", "jo", "ji", "ja", "je", "khaan",
+    "aahe", "aahin", "chha", "ketri", "ketro", "mukhay", "dekharo", "moklyo", "mokal", "diyo", "karyo",
+    "aj", "sabhani", "hui", "hua",
 ]
 
 COURSE_FILLER_WORDS_ARABIC = [
-    # Course / subject / class words
+    # Course / file words
     "کورس", "کورسز", "ڪورس", "ڪورسز", "مضمون", "ڪلاس", "کلاس",
-    # Resource & action words
-    "ڈاؤنلوڈ", "ڊائونلوڊ", "لیکچر", "ليڪچر", "سلائیڈز", "سلائيڊس", "فائل", "فائلیں", "فائيل", "نوٹس", "نوٽس",
-    "بھیجو", "بھیج", "موڪليو", "موڪل", "ڏيو",
-    # Latest / recent words
-    "آخری", "آخري", "نیا", "نيا", "نئی", "نئي", "نئون",
-    # Prepositions / connectors
-    "سے", "کان", "کا", "کی", "کے", "کو", "میں", "۾", "تي", "پر", "جو", "جي", "جا", "کي",
+    "لیکچر", "ليڪچر", "سلائیڈز", "سلائيڊس", "فائل", "فائلیں", "فائيل", "نوٹس", "نوٽس",
+    "ڈاؤنلوڈ", "ڊائونلوڊ",
+    # Intent keywords
+    "حاضري", "حاضری", "گريڊ", "گریڈ", "مارڪس", "مارکس", "نمبر", "سي ايل او", "سی ایل او",
+    "اسائنمينٽ", "اسائنمينٽس", "اسائنمنٹ", "ڪم", "کام", "آخري تاريخ", "آخری تاریخ",
+    "ايندڙ", "ایندڙ", "باقي", "باقی", "مدد", "هيلپ", "ہیلپ", "سلام",
+    # Request & action words
+    "دکھاؤ", "بتاؤ", "ڏيکاريو", "ٻڌايو", "بھیجو", "بھیج", "دو", "موڪليو", "موڪل", "ڏيو", "ڪريو", "کرو",
+    # Prepositions & pronouns
+    "سے", "کان", "کا", "کی", "کے", "کو", "میں", "۾", "تي", "پر", "جو", "جي", "جا", "کي", "مون",
+    "میرا", "میری", "میرے", "منهنجو", "منهنجي", "منهنجا",
+    # Questions & helpers
+    "کیا", "ڇا", "کتنا", "کتنی", "ڪيتري", "ڪيترو", "ہے", "ہیں", "آهي", "آهن",
+    "تھا", "تھی", "تھے", "ہوا", "ہوئی", "ٿيو", "ٿيا", "ٿي", "هئي", "هو",
+    "اڄ", "آج", "سڀاڻي", "کل", "آخری", "آخري", "نیا", "نيا", "نئی", "نئي", "نئون",
+    "پہلا", "پہلی", "پہلے", "پهريون", "پهرين",
 ]
 
 # --- LMS-related but unsupported request keywords (GPA, timetable, fees, etc.) ---

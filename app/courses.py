@@ -74,7 +74,7 @@ def clean_course_query(text: str) -> str:
 
     kept_tokens = []
     for token in raw_tokens:
-        clean_tok = re.sub(r"^[^\w]+|[^\w]+$", "", token)
+        clean_tok = re.sub(r"^[^\w\u0600-\u06FF]+|[^\w\u0600-\u06FF]+$", "", token)
         if not clean_tok:
             continue
 

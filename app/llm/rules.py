@@ -313,39 +313,42 @@ def match_rules(text: str, has_pending_download: bool = False, stored_lang: str 
     # 4. Extract course_query candidates
     course_query = None
     if matched_intent in ("attendance", "download", "resources", "clos", "grades", "courses"):
-        # Remove matched keywords, week digits, ordinals, and stop words
-        tokens = re.findall(r"[A-Za-z0-9\u0600-\u06FF]+", clean_text)
-        candidates = []
-        week_words = {
-            "week", "wk", "w", "lecture", "lec", "l", "hafta", "hafto", "hafte",
-            "هفتو", "هفتي", "ہفتہ", "ہفتے", "لیکچر", "ليڪچر"
-        }
-        kw_words = {w for kws in KEYWORDS.values() for kw in kws for w in kw.lower().split()}
-        kw_words.update(number_words)
-        folded_kw_words = {fold_arabic_script(w) for w in kw_words}
+        cq_clean = clean_course_query(clean_text)
+        if cq_clean:
+            course_query = cq_clean
+        else:
+            # Remove matched keywords, week digits, ordinals, and stop words
+            tokens = re.findall(r"[A-Za-z0-9\u0600-\u06FF]+", clean_text)
+            candidates = []
+            week_words = {
+                "week", "wk", "w", "lecture", "lec", "l", "hafta", "hafto", "hafte",
+                "هفتو", "هفتي", "ہفتہ", "ہفتے", "لیکچر", "ليڪچر"
+            }
+            kw_words = {w for kws in KEYWORDS.values() for kw in kws for w in kw.lower().split()}
+            kw_words.update(number_words)
+            folded_kw_words = {fold_arabic_script(w) for w in kw_words}
 
-        for t in tokens:
-            tl = t.lower()
-            folded_t = fold_arabic_script(t).lower()
-            if tl.isdigit() and week_num is not None and int(tl) == week_num:
-                continue
-            if tl in STOP_WORDS or folded_t in STOP_WORDS or tl in week_words or folded_t in week_words:
-                continue
-            if t in SINDHI_ORDINALS or tl in SINDHI_ORDINALS or folded_t in SINDHI_ORDINALS:
-                continue
-            if tl in kw_words or folded_t in folded_kw_words:
-                continue
-            if len(t) >= 2:
-                candidates.append(t)
+            for t in tokens:
+                tl = t.lower()
+                folded_t = fold_arabic_script(t).lower()
+                if tl.isdigit() and week_num is not None and int(tl) == week_num:
+                    continue
+                if tl in STOP_WORDS or folded_t in STOP_WORDS or tl in week_words or folded_t in week_words:
+                    continue
+                if t in SINDHI_ORDINALS or tl in SINDHI_ORDINALS or folded_t in SINDHI_ORDINALS:
+                    continue
+                if tl in kw_words or folded_t in folded_kw_words:
+                    continue
+                if len(t) >= 2:
+                    candidates.append(t)
 
-        if candidates:
-            # Prefer upper case acronyms / codes like NLP, HCI, DE304
-            upper_cands = [c for c in candidates if c.isupper() or any(ch.isdigit() for ch in c)]
-            if upper_cands:
-                raw_cq = " ".join(upper_cands[:2])
-            else:
-                raw_cq = " ".join(candidates[:3])
-            course_query = clean_course_query(raw_cq) or raw_cq
+            if candidates:
+                # Prefer upper case acronyms / codes like NLP, HCI, DE304
+                upper_cands = [c for c in candidates if c.isupper() or any(ch.isdigit() for ch in c)]
+                if upper_cands:
+                    course_query = " ".join(upper_cands[:2])
+                else:
+                    course_query = " ".join(candidates[:3])
 
     action = {"intent": matched_intent}
     if course_query:

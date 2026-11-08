@@ -226,6 +226,10 @@ if (require.main === module) {
     if (!ready) return res.status(503).json({ error: "not ready" });
     const { chat_id, text } = req.body;
     if (!chat_id) return res.status(400).json({ error: "chat_id required" });
+    if (typeof text !== "string" || !text.trim()) {
+      console.log("[SEND] rejected empty text");
+      return res.status(400).json({ error: "empty text" });
+    }
     try {
       await client.sendMessage(chat_id, "🤖 " + text);
       res.json({ ok: true });
