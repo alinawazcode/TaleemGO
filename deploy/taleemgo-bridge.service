@@ -1,0 +1,32 @@
+[Unit]
+Description=TaleemGo AI - Node.js WhatsApp Web.js Bridge
+After=network.target taleemgo-api.service
+Wants=taleemgo-api.service
+
+[Service]
+Type=simple
+User=taleemgo
+Group=taleemgo
+WorkingDirectory=/opt/taleemgo/app-src/whatsapp_bridge
+EnvironmentFile=/opt/taleemgo/.env
+ExecStart=/usr/bin/node bridge.js
+Restart=always
+RestartSec=10
+TimeoutStopSec=20
+KillMode=control-group
+MemoryMax=2800M
+
+# Security hardening & permissions
+NoNewPrivileges=true
+ProtectSystem=full
+ProtectHome=read-only
+ReadWritePaths=/opt/taleemgo
+LimitNOFILE=65535
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=taleemgo-bridge
+
+[Install]
+WantedBy=multi-user.target
