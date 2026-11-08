@@ -820,7 +820,7 @@ class TestModelFailoverAndClassification(LLMBaseTestCase):
         self.assertFalse(is_valid_api_key("csk_your_cerebras_api_key_here"))
         self.assertFalse(is_valid_api_key("gsk_xxxxxxxxxxxxxxxxxxxxxx"))
         self.assertFalse(is_valid_api_key("change_me_to_a_real_key_please"))
-        self.assertTrue(is_valid_api_key("gsk_" + "a1B2c3D4" * 6"))
+        self.assertTrue(is_valid_api_key("gsk_" + "a1B2c3D4" * 6))
 
     @patch("requests.post")
     def test_client_error_flat_60s_cooldown(self, mock_post):
