@@ -9,6 +9,15 @@ try:
 except ImportError:
     from llm.lang_data import KEYWORDS, SINDHI_ORDINALS, UNSUPPORTED_KEYWORDS, convert_to_ascii_digits, fold_arabic_script
 
+try:
+    from app.courses import clean_course_query
+except ImportError:
+    try:
+        from courses import clean_course_query
+    except ImportError:
+        def clean_course_query(t):
+            return t
+
 WEEK_DIGIT_RE = re.compile(r"\b(?:week|wk|w|lecture|lec|l|hafta|hafto|hafte|هفتو|هفتي|ہفتہ|ہفتے|لیکچر|ليڪچر)\s*(\d+)\b", re.IGNORECASE)
 
 STOP_WORDS = {
@@ -54,10 +63,44 @@ def _edit_distance_1(w1: str, w2: str) -> bool:
     return False
 
 
-def detect_language(text: str, stored_lang: str = "en") -> str:
-    """Heuristic language tag detector."""
+ENGLISH_COMMON_MARKERS = {
+    "download", "latest", "newest", "recent", "last", "new",
+    "lecture", "lectures", "from", "course", "courses", "subject", "subjects",
+    "slides", "slide", "notes", "file", "files",
+    "show", "what", "is", "my", "give", "please", "me", "send", "attendance", "assignments", "upcoming", "due",
+    "grades", "marks", "which", "week", "get", "check", "tell", "any", "the", "in", "to", "for", "of", "and", "or",
+    "all", "how", "many", "when", "help", "who", "where", "can", "you", "i", "am", "are", "marked", "mark",
+    "today", "yesterday", "tomorrow", "this", "that", "was", "were", "first", "second", "third", "do", "does", "did",
+}
+
+SINDHI_ROMAN_MARKERS = {
+    "munhinji", "munhinjo", "munhinja", "ketri", "ketro", "aahe", "aahin",
+    "moklyo", "mokal", "hafto", "pehrio", "pehrin", "sabhani", "kors", "madad",
+    "diyo", "dekharo", "chha", "khaan", "karyo", "aj", "hui", "hua",
+}
+
+URDU_ROMAN_MARKERS = {
+    "mera", "meri", "mere", "kitna", "kitni", "hai", "hain", "karo", "karna", "bhejo", "bhej",
+    "hafta", "hafte", "pehla", "pehle", "kal", "aaj", "madad", "chahiye",
+    "ka", "ki", "ke", "ky", "ko", "se", "par", "kya", "batao", "dikhao", "nambar", "akhri", "aakhri",
+    "naya", "nayi", "naye", "mein", "wala", "wali", "wale", "kuch",
+}
+
+URDU_GRAMMAR_MARKERS = {
+    "ka", "ki", "ke", "ky", "ko", "se", "me", "mein", "mera", "meri", "mere",
+    "hai", "hain", "bhejo", "bhej", "karo", "karna", "kya", "kitna", "kitni", "dikhao", "batao",
+}
+
+
+def detect_language(text: str, stored_lang: str = "en", is_recent: bool = True) -> str:
+    """
+    Heuristic language tag detector.
+    - Follows CURRENT message when it is clearly in a language.
+    - Only inherits previous message's language (within 10 minutes) for very short (<=3 words)
+      or signal-less messages (e.g. "2", "ok").
+    """
     if not text:
-        return stored_lang
+        return stored_lang if (is_recent and stored_lang) else "en"
 
     if ARABIC_SCRIPT_RE.search(text):
         if any(c in SINDHI_SPECIFIC_CHARS for c in text):
@@ -71,24 +114,42 @@ def detect_language(text: str, stored_lang: str = "en") -> str:
         return "ur"
 
     # Latin text
-    tl = text.lower()
+    tl = text.lower().strip()
     words = re.findall(r"[a-z0-9]+", tl)
+    if not words:
+        return stored_lang if (is_recent and stored_lang) else "en"
 
-    sindhi_roman_markers = {"munhinji", "munhinjo", "ketri", "aahe", "aahin", "moklyo", "mokal", "hafto", "pehrio", "sabhani", "kors", "madad"}
-    urdu_roman_markers = {"mera", "meri", "mere", "kitna", "kitni", "hai", "hain", "karo", "karna", "bhejo", "hafta", "hafte", "pehla", "pehle", "kal", "aaj", "madad", "chahiye"}
+    sd_score = sum(1 for w in words if w in SINDHI_ROMAN_MARKERS)
+    ur_score = sum(1 for w in words if w in URDU_ROMAN_MARKERS)
+    en_score = sum(1 for w in words if w in ENGLISH_COMMON_MARKERS)
+    has_ur_grammar = any(w in URDU_GRAMMAR_MARKERS for w in words)
 
-    sd_score = sum(1 for w in words if w in sindhi_roman_markers)
-    ur_score = sum(1 for w in words if w in urdu_roman_markers)
+    # 1. Very short or signal-less message (<= 3 words, or bare number) with no language signal
+    is_bare_number = all(w.isdigit() for w in words)
+    has_signal = (sd_score > 0 or ur_score > 0 or en_score > 0 or has_ur_grammar)
+    if is_bare_number or (len(words) <= 3 and not has_signal):
+        return stored_lang if (is_recent and stored_lang) else "en"
 
-    if sd_score > ur_score and sd_score > 0:
+    # 2. Sindhi Roman wins if Sindhi markers dominate
+    if sd_score > ur_score and sd_score > 0 and sd_score >= en_score:
         return "sd-roman"
-    if ur_score > 0:
+
+    # 3. Urdu Roman wins if Urdu markers or Urdu grammar present
+    if (ur_score > 0 and ur_score >= en_score) or has_ur_grammar:
         return "ur-roman"
 
-    return stored_lang if stored_lang != "en" else "en"
+    # 4. English wins if English markers present and no Urdu grammar
+    if en_score > 0:
+        return "en"
+
+    # 5. Short message fallback
+    if len(words) <= 3 and is_recent and stored_lang:
+        return stored_lang
+
+    return "en"
 
 
-def match_rules(text: str, has_pending_download: bool = False, stored_lang: str = "en") -> Optional[dict]:
+def match_rules(text: str, has_pending_download: bool = False, stored_lang: str = "en", is_recent: bool = True) -> Optional[dict]:
     """
     Match user message against rule patterns.
     Returns structured intent dict or None.
@@ -97,7 +158,7 @@ def match_rules(text: str, has_pending_download: bool = False, stored_lang: str 
         return None
 
     clean_text = convert_to_ascii_digits(text).strip()
-    lang = detect_language(clean_text, stored_lang=stored_lang)
+    lang = detect_language(clean_text, stored_lang=stored_lang, is_recent=is_recent)
 
     # 1. Check for pending download selection ("2", "1,3", "all", "cancel")
     if has_pending_download:
@@ -168,6 +229,31 @@ def match_rules(text: str, has_pending_download: bool = False, stored_lang: str 
     # Attendance keywords check
     has_attendance = has_keyword(KEYWORDS["attendance"])
 
+    # Latest keywords check:
+    # - Latin whole words and edit distance 1 for typos (len >= 5, e.g. "lastest")
+    # - Arabic folded substring
+    def has_latest_keyword():
+        latest_kws = KEYWORDS.get("latest", [])
+        latin_kws = [k for k in latest_kws if re.match(r"^[a-zA-Z]+$", k)]
+        arabic_kws = [k for k in latest_kws if not re.match(r"^[a-zA-Z]+$", k)]
+
+        for kw in latin_kws:
+            if re.search(r"\b" + re.escape(kw.lower()) + r"\b", norm_lower):
+                return True
+            if len(kw) >= 5:
+                for word in re.findall(r"\b[a-z]+\b", norm_lower):
+                    if len(word) >= 5 and _edit_distance_1(word, kw.lower()):
+                        return True
+
+        for ak in arabic_kws:
+            folded_ak = fold_arabic_script(ak).lower()
+            if folded_ak in folded_lower or ak.lower() in norm_lower:
+                return True
+
+        return False
+
+    is_latest = has_latest_keyword()
+
     # Grades keywords check:
     # - Latin-script keywords match as WHOLE WORDS only (regex \b)
     # - Arabic-script keywords keep working as they do now (folded substring)
@@ -207,8 +293,8 @@ def match_rules(text: str, has_pending_download: bool = False, stored_lang: str 
         matched_intent = "grades"
     elif has_keyword(KEYWORDS["clos"]):
         matched_intent = "clos"
-    elif (week_num is not None and has_explicit_week) or has_keyword(KEYWORDS["files"]):
-        # Week number with week word or file/download word -> download intent
+    elif (week_num is not None and has_explicit_week) or has_keyword(KEYWORDS["files"]) or is_latest:
+        # Week number with week word or file/download word or latest -> download intent
         matched_intent = "download"
     elif has_keyword(KEYWORDS["upcoming"]):
         matched_intent = "upcoming"
@@ -226,7 +312,7 @@ def match_rules(text: str, has_pending_download: bool = False, stored_lang: str 
 
     # 4. Extract course_query candidates
     course_query = None
-    if matched_intent in ("attendance", "download", "resources", "clos", "grades"):
+    if matched_intent in ("attendance", "download", "resources", "clos", "grades", "courses"):
         # Remove matched keywords, week digits, ordinals, and stop words
         tokens = re.findall(r"[A-Za-z0-9\u0600-\u06FF]+", clean_text)
         candidates = []
@@ -256,13 +342,16 @@ def match_rules(text: str, has_pending_download: bool = False, stored_lang: str 
             # Prefer upper case acronyms / codes like NLP, HCI, DE304
             upper_cands = [c for c in candidates if c.isupper() or any(ch.isdigit() for ch in c)]
             if upper_cands:
-                course_query = " ".join(upper_cands[:2])
+                raw_cq = " ".join(upper_cands[:2])
             else:
-                course_query = " ".join(candidates[:3])
+                raw_cq = " ".join(candidates[:3])
+            course_query = clean_course_query(raw_cq) or raw_cq
 
     action = {"intent": matched_intent}
     if course_query:
         action["course_query"] = course_query
+    if is_latest:
+        action["latest"] = True
     if matched_intent == "download" and week_num is not None:
         action["week"] = week_num
 

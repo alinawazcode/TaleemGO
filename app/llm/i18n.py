@@ -136,41 +136,64 @@ def _translate_with_llm(english_text: str, target_lang: str) -> Optional[str]:
     return None
 
 
+def verify_builtin_i18n_keys():
+    """Startup self-check that every built-in i18n key has a non-empty English value."""
+    en_dict = STRINGS.get("en", {})
+    if not en_dict:
+        raise ValueError("STRINGS['en'] is missing or empty")
+    for k, v in en_dict.items():
+        if not isinstance(v, str) or not v.strip():
+            raise ValueError(f"Built-in i18n key '{k}' has empty or invalid English value: {v!r}")
+
+
+# Run startup check on module import
+verify_builtin_i18n_keys()
+
+
 def t(key: str, lang: str = "en", **kwargs) -> str:
     """
     Return localized text for key and format with kwargs.
     - en, ur, sd use hand-written built-in strings.
     - Other languages check i18n_cache, or translate once via LLM and cache.
     - Falls back to English if key missing or translation fails validation.
+    - If result is empty (e.g. empty cached translation), falls back to English; never returns empty string.
     """
     clean_lang = (lang or "en").lower()
+    en_template = STRINGS.get("en", {}).get(key, "")
+
+    def _format(template: str) -> Optional[str]:
+        if not template or not str(template).strip():
+            return None
+        try:
+            res = template.format(**kwargs) if kwargs else template
+            return res if res and str(res).strip() else None
+        except Exception:
+            return template if template.strip() else None
 
     # 1. Built-in languages
     if clean_lang in ("en", "ur", "sd"):
-        template = STRINGS.get(clean_lang, {}).get(key) or STRINGS["en"].get(key, "")
-        try:
-            return template.format(**kwargs) if kwargs else template
-        except Exception:
-            return template
+        lang_template = STRINGS.get(clean_lang, {}).get(key)
+        res = _format(lang_template)
+        if res:
+            return res
+        fallback = _format(en_template)
+        return fallback if fallback else key
 
     # 2. Check SQLite cache
     cached = _get_cached_translation(clean_lang, key)
-    if cached:
-        try:
-            return cached.format(**kwargs) if kwargs else cached
-        except Exception:
-            return cached
+    if cached and str(cached).strip():
+        res = _format(cached)
+        if res:
+            return res
 
     # 3. Dynamic translation via LLM
-    en_template = STRINGS["en"].get(key, "")
     translated = _translate_with_llm(en_template, clean_lang)
-    if translated and _validate_translation(en_template, translated):
+    if translated and str(translated).strip() and _validate_translation(en_template, translated):
         _set_cached_translation(clean_lang, key, translated)
-        template = translated
-    else:
-        template = en_template
+        res = _format(translated)
+        if res:
+            return res
 
-    try:
-        return template.format(**kwargs) if kwargs else template
-    except Exception:
-        return template
+    # Fallback to English
+    fallback = _format(en_template)
+    return fallback if fallback else key

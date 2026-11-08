@@ -366,7 +366,7 @@ class TestBotGradesCommand(BaseGradesTestCase):
         # 2. Unknown course query
         self.sent_texts.clear()
         wa_bot.handle(chat_id, "grades Quantum Mechanics")
-        self.assertTrue(any("I couldn't find that course. Your courses:" in txt for _, txt in self.sent_texts))
+        self.assertTrue(any("I couldn't find that course." in txt and "Your courses:" in txt for _, txt in self.sent_texts))
 
     def test_grades_message_length_splitting(self):
         """When grades output exceeds 3500 chars across courses, it splits on course boundaries."""

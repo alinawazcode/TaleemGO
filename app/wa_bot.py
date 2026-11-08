@@ -5,6 +5,7 @@ Run with:  uvicorn app.wa_bot:api --port 8000
 Incoming JSON: { "chat_id": "...", "text": "...", "is_self": true/false }
 Conversation states: awaiting_email → awaiting_password → active | expired
 """
+import inspect
 import logging
 import os
 import re
@@ -21,7 +22,7 @@ from starlette.concurrency import run_in_threadpool
 sys.path.insert(0, os.path.dirname(__file__))
 load_dotenv(os.path.join(os.path.dirname(__file__), "..", ".env"))
 
-from courses import course_acronym, format_course_list, resolve_course  # noqa: E402
+from courses import clean_course_query, course_acronym, format_course_list, resolve_course  # noqa: E402
 from lms_client import LMSClient, LMSAuthExpired, LMSError, summarize_grades  # noqa: E402
 from timeutils import to_local                                          # noqa: E402
 import wa_transport as wa                                               # noqa: E402
@@ -31,6 +32,7 @@ from wa_monitor import run_all_users                                    # noqa: 
 try:
     from app.llm.lang_data import (
         ACTIVATION_PHRASES_DEFAULT,
+        KEYWORDS,
         fold_arabic_script,
         matches_jailbreak_prefilter,
         sanitize_user_message,
@@ -44,10 +46,11 @@ try:
         run_live_check,
     )
     from app.llm.router import get_configured_providers, is_llm_enabled, route_intent
-    from app.llm.rules import match_rules
+    from app.llm.rules import detect_language, match_rules
 except ImportError:
     from llm.lang_data import (
         ACTIVATION_PHRASES_DEFAULT,
+        KEYWORDS,
         fold_arabic_script,
         matches_jailbreak_prefilter,
         sanitize_user_message,
@@ -61,7 +64,7 @@ except ImportError:
         run_live_check,
     )
     from llm.router import get_configured_providers, is_llm_enabled, route_intent
-    from llm.rules import match_rules
+    from llm.rules import detect_language, match_rules
 
 log = logging.getLogger("taleemgo.wa")
 logging.basicConfig(level=logging.INFO)
@@ -93,7 +96,8 @@ WELCOME = (
     "I use AI services to understand your messages. Never send your password except when I ask for it at login."
 )
 
-WEEK_RE = re.compile(r"^(?:week|wk|w|lecture|lec|l)\s*(\d+)$", re.IGNORECASE)
+WEEK_RE = re.compile(r"^(?:week|wk|w|lecture|lec|l|hafta|hafte|hafto|هفتو|هفتي|ہفتہ|ہفتے)\s*(\d+)$", re.IGNORECASE)
+WEEK_SEARCH_RE = re.compile(r"\b(?:week|wk|w|lecture|lec|l|hafta|hafte|hafto|هفتو|هفتي|ہفتہ|ہفتے)\s*(\d+)\b", re.IGNORECASE)
 
 ASSIGNMENT_EMOJI = {
     "submitted": "✅",
@@ -144,6 +148,10 @@ def _start_monitor():
 # ---- helpers ----
 
 def _reply(chat_id: str, text: str):
+    if text is None or not str(text).strip():
+        caller = inspect.stack()[1].function if len(inspect.stack()) > 1 else "_reply"
+        log.info("[SEND] empty text suppressed caller=%s", caller)
+        return
     try:
         if len(text) <= 3500:
             wa.send_text(chat_id, text)
@@ -253,7 +261,10 @@ def _show_course_attendance(chat_id: str, lms, course: dict, att: dict = None):
 def _handle_attendance_cmd(chat_id: str, lms, arg: str):
     att = lms.get_attendance()
     courses = lms.get_courses()
+    user = usr.get_user(chat_id)
+    lang = user.get("lang", "en") if user else "en"
     if not arg:
+        usr.set_pending_action(chat_id, {"intent": "attendance"})
         o = att.get("overall", {})
         pres = o.get("present", 0)
         tot = o.get("total", 0)
@@ -272,13 +283,14 @@ def _handle_attendance_cmd(chat_id: str, lms, arg: str):
 
     matches = resolve_course(lms, arg)
     if not matches:
-        _reply(chat_id, "I couldn't find that course. Your courses:\n" + format_course_list(courses))
+        usr.set_pending_action(chat_id, {"intent": "attendance"})
+        _reply(chat_id, t("course_not_found", lang, courses=format_course_list(courses)))
     elif len(matches) == 1:
         _show_course_attendance(chat_id, lms, matches[0], att)
     else:
         options = "\n".join(f"{i}. {c.get('code')} {c.get('name')}" for i, c in enumerate(matches, 1))
         usr.set_pending(chat_id, {"type": "course", "courses": matches, "command": "attendance", "extra": ""})
-        _reply(chat_id, f"Which course?\n{options}\n\nReply with a number. Reply \"cancel\" to stop.")
+        _reply(chat_id, t("which_course", lang, options=options))
 
 
 def _show_course_resources(chat_id: str, lms, course: dict):
@@ -310,18 +322,22 @@ def _show_course_resources(chat_id: str, lms, course: dict):
 
 def _handle_resources_cmd(chat_id: str, lms, arg: str):
     courses = lms.get_courses()
+    user = usr.get_user(chat_id)
+    lang = user.get("lang", "en") if user else "en"
     if not arg:
+        usr.set_pending_action(chat_id, {"intent": "resources"})
         _reply(chat_id, "Usage: resources <course>\n\nYour courses:\n" + format_course_list(courses))
         return
     matches = resolve_course(lms, arg)
     if not matches:
-        _reply(chat_id, "I couldn't find that course. Your courses:\n" + format_course_list(courses))
+        usr.set_pending_action(chat_id, {"intent": "resources"})
+        _reply(chat_id, t("course_not_found", lang, courses=format_course_list(courses)))
     elif len(matches) == 1:
         _show_course_resources(chat_id, lms, matches[0])
     else:
         options = "\n".join(f"{i}. {c.get('code')} {c.get('name')}" for i, c in enumerate(matches, 1))
         usr.set_pending(chat_id, {"type": "course", "courses": matches, "command": "resources", "extra": ""})
-        _reply(chat_id, f"Which course?\n{options}\n\nReply with a number. Reply \"cancel\" to stop.")
+        _reply(chat_id, t("which_course", lang, options=options))
 
 
 def _show_course_clos(chat_id: str, lms, course: dict):
@@ -341,18 +357,22 @@ def _show_course_clos(chat_id: str, lms, course: dict):
 
 def _handle_clos_cmd(chat_id: str, lms, arg: str):
     courses = lms.get_courses()
+    user = usr.get_user(chat_id)
+    lang = user.get("lang", "en") if user else "en"
     if not arg:
+        usr.set_pending_action(chat_id, {"intent": "clos"})
         _reply(chat_id, "Usage: clos <course>\n\nYour courses:\n" + format_course_list(courses))
         return
     matches = resolve_course(lms, arg)
     if not matches:
-        _reply(chat_id, "I couldn't find that course. Your courses:\n" + format_course_list(courses))
+        usr.set_pending_action(chat_id, {"intent": "clos"})
+        _reply(chat_id, t("course_not_found", lang, courses=format_course_list(courses)))
     elif len(matches) == 1:
         _show_course_clos(chat_id, lms, matches[0])
     else:
         options = "\n".join(f"{i}. {c.get('code')} {c.get('name')}" for i, c in enumerate(matches, 1))
         usr.set_pending(chat_id, {"type": "course", "courses": matches, "command": "clos", "extra": ""})
-        _reply(chat_id, f"Which course?\n{options}\n\nReply with a number. Reply \"cancel\" to stop.")
+        _reply(chat_id, t("which_course", lang, options=options))
 
 
 def _show_course_grades(chat_id: str, lms, course: dict):
@@ -401,7 +421,10 @@ def _handle_grades_cmd(chat_id: str, lms, arg: str = ""):
         return
 
     arg = (arg or "").strip()
+    user = usr.get_user(chat_id)
+    lang = user.get("lang", "en") if user else "en"
     if not arg:
+        usr.set_pending_action(chat_id, {"intent": "grades"})
         blocks = []
         for c in courses:
             acr = course_acronym(c.get("name", ""))
@@ -455,13 +478,14 @@ def _handle_grades_cmd(chat_id: str, lms, arg: str = ""):
 
     matches = resolve_course(lms, arg)
     if not matches:
-        _reply(chat_id, "I couldn't find that course. Your courses:\n" + format_course_list(courses))
+        usr.set_pending_action(chat_id, {"intent": "grades"})
+        _reply(chat_id, t("course_not_found", lang, courses=format_course_list(courses)))
     elif len(matches) == 1:
         _show_course_grades(chat_id, lms, matches[0])
     else:
         options = "\n".join(f"{i}. {c.get('code')} {c.get('name')}" for i, c in enumerate(matches, 1))
         usr.set_pending(chat_id, {"type": "course", "courses": matches, "command": "grades", "extra": ""})
-        _reply(chat_id, f"Which course?\n{options}\n\nReply with a number. Reply \"cancel\" to stop.")
+        _reply(chat_id, t("which_course", lang, options=options))
 
 
 def _send_files_choice(chat_id: str, lms, files: list, indices: list = None):
@@ -478,6 +502,8 @@ def _send_files_choice(chat_id: str, lms, files: list, indices: list = None):
 
     if len(to_send) == 1 and indices is not None and len(indices) == 1:
         r = to_send[0]
+        user = usr.get_user(chat_id)
+        lang = user.get("lang", "en") if user else "en"
         try:
             path = lms.download_resource(r["id"], folder=folder)
             wa.send_file(chat_id, path, r.get("title", ""))
@@ -485,7 +511,7 @@ def _send_files_choice(chat_id: str, lms, files: list, indices: list = None):
             _reply(chat_id, str(e))
         except Exception:
             log.exception("Failed to download resource %s for %s…", r.get("id"), chat_id[-6:])
-            _reply(chat_id, f"Could not download {r.get('title', 'file')}. Please try again later.")
+            _reply(chat_id, t("file_failed", lang, filename=r.get("title", "file")))
         return
 
     total = len(to_send)
@@ -508,13 +534,49 @@ def _send_files_choice(chat_id: str, lms, files: list, indices: list = None):
         _reply(chat_id, f"Sent {sent_count} of {total} files ({len(failed_names)} failed: {failed_str}).")
 
 
-def _handle_download_for_course(chat_id: str, lms, course: dict, remainder: str):
+def _handle_download_for_course(chat_id: str, lms, course: dict, remainder: str = "", is_latest: bool = False, lang: str = "en"):
     all_res = [r for r in lms.get_resources() if r["course_id"] == course["id"]]
     acr = course_acronym(course.get("name", "")) or course["code"]
+    course_label = f"{acr} ({course['code']})"
+
+    m_week = WEEK_RE.match(remainder) if remainder else None
+
+    # If is_latest and no explicit week, send newest directly
+    if is_latest and not m_week:
+        if not all_res:
+            _reply(chat_id, t("no_files", lang, course=course_label))
+            return
+
+        # Newest resource: highest week_number (null as -1), tie-break newest created_at
+        newest = sorted(
+            all_res,
+            key=lambda r: (
+                r.get("week_number") if r.get("week_number") is not None else -1,
+                r.get("created_at") or "",
+            ),
+            reverse=True,
+        )[0]
+
+        wk = newest.get("week_number")
+        title = newest.get("title", "")
+        if wk is not None:
+            caption = t("latest_caption", lang, course=course_label, week=wk, title=title)
+        else:
+            caption = t("latest_caption_no_week", lang, course=course_label, title=title)
+
+        folder = usr.user_downloads_dir(chat_id)
+        usr.cleanup_user_downloads(chat_id)
+        try:
+            path = lms.download_resource(newest["id"], folder=folder)
+            wa.send_file(chat_id, path, caption)
+        except Exception:
+            log.exception("Failed to send latest file %s for %s…", newest.get("id"), chat_id[-6:])
+            _reply(chat_id, t("file_failed", lang, filename=title or "file"))
+        return
 
     if not remainder:
         if not all_res:
-            _reply(chat_id, f"No files found in {course['code']} - {course['name']}.")
+            _reply(chat_id, t("no_files", lang, course=course_label))
             return
         weeks_map = {}
         for r in all_res:
@@ -540,7 +602,6 @@ def _handle_download_for_course(chat_id: str, lms, course: dict, remainder: str)
         _reply(chat_id, "\n".join(lines))
         return
 
-    m_week = WEEK_RE.match(remainder)
     if m_week:
         week_num = int(m_week.group(1))
         week_files = [r for r in all_res if r.get("week_number") == week_num]
@@ -584,8 +645,23 @@ def _handle_download_for_course(chat_id: str, lms, course: dict, remainder: str)
 
 def _handle_download_cmd(chat_id: str, lms, arg: str):
     if not arg:
+        usr.set_pending_action(chat_id, {"intent": "download"})
         _reply(chat_id, "Usage: download <course> [week N | title]")
         return
+
+    # Check if arg mentions latest
+    arg_lower = arg.lower()
+    is_latest = False
+    latest_kws = KEYWORDS.get("latest", [])
+    for kw in latest_kws:
+        if re.search(r"\b" + re.escape(kw.lower()) + r"\b", arg_lower):
+            is_latest = True
+            break
+        if len(kw) >= 5:
+            for word in re.findall(r"\b[a-z]+\b", arg_lower):
+                if len(word) >= 5 and _edit_distance_1(word, kw.lower()):
+                    is_latest = True
+                    break
 
     words = arg.split()
     best_matches = []
@@ -598,15 +674,32 @@ def _handle_download_cmd(chat_id: str, lms, arg: str):
             best_idx = i
             break
 
+    user = usr.get_user(chat_id)
+    lang = user.get("lang", "en") if user else "en"
+
+    remainder = " ".join(words[best_idx:]).strip() if best_matches else ""
+
+    if not best_matches:
+        # Fallback: check if there is an explicit week and clean the rest of arg
+        m_wk = WEEK_SEARCH_RE.search(arg)
+        arg_to_clean = arg
+        if m_wk:
+            remainder = f"week {m_wk.group(1)}"
+            arg_to_clean = (arg[:m_wk.start()] + " " + arg[m_wk.end():]).strip()
+        c_clean = clean_course_query(arg_to_clean)
+        if c_clean:
+            hits = resolve_course(lms, c_clean)
+            if hits:
+                best_matches = hits
+
     if not best_matches:
         courses = lms.get_courses()
-        _reply(chat_id, "I couldn't find that course. Your courses:\n" + format_course_list(courses))
+        usr.set_pending_action(chat_id, {"intent": "download", "latest": is_latest})
+        _reply(chat_id, t("course_not_found", lang, courses=format_course_list(courses)))
         return
 
-    remainder = " ".join(words[best_idx:]).strip()
-
     if len(best_matches) == 1:
-        _handle_download_for_course(chat_id, lms, best_matches[0], remainder)
+        _handle_download_for_course(chat_id, lms, best_matches[0], remainder, is_latest=is_latest, lang=lang)
     else:
         options = "\n".join(f"{i}. {c.get('code')} {c.get('name')}" for i, c in enumerate(best_matches, 1))
         usr.set_pending(chat_id, {
@@ -614,11 +707,14 @@ def _handle_download_cmd(chat_id: str, lms, arg: str):
             "courses": best_matches,
             "command": "download",
             "extra": remainder,
+            "is_latest": is_latest,
         })
-        _reply(chat_id, f"Which course?\n{options}\n\nReply with a number. Reply \"cancel\" to stop.")
+        _reply(chat_id, t("which_course", lang, options=options))
 
 
-def _execute_course_command(chat_id: str, lms, cmd: str, course: dict, extra: str = ""):
+def _execute_course_command(chat_id: str, lms, cmd: str, course: dict, extra: str = "", is_latest: bool = False):
+    user = usr.get_user(chat_id)
+    lang = user.get("lang", "en") if user else "en"
     if cmd == "attendance":
         _show_course_attendance(chat_id, lms, course)
     elif cmd == "resources":
@@ -626,7 +722,7 @@ def _execute_course_command(chat_id: str, lms, cmd: str, course: dict, extra: st
     elif cmd == "clos":
         _show_course_clos(chat_id, lms, course)
     elif cmd == "download":
-        _handle_download_for_course(chat_id, lms, course, extra)
+        _handle_download_for_course(chat_id, lms, course, extra, is_latest=is_latest, lang=lang)
     elif cmd == "grades":
         _show_course_grades(chat_id, lms, course)
 
@@ -673,7 +769,32 @@ def _handle_pending(chat_id: str, lms, pending: dict, text: str) -> bool:
                 chosen = courses[idx - 1]
                 cmd = pending.get("command")
                 extra = pending.get("extra", "")
-                _execute_course_command(chat_id, lms, cmd, chosen, extra)
+                is_latest = bool(pending.get("is_latest", False))
+                _execute_course_command(chat_id, lms, cmd, chosen, extra, is_latest=is_latest)
+                return True
+            else:
+                _reply(chat_id, f"Please pick a number between 1 and {len(courses)}.")
+                return True
+
+        return False
+
+    elif pending.get("type") == "course_menu":
+        if tl == "cancel":
+            usr.clear_pending(chat_id)
+            _reply(chat_id, "Cancelled.")
+            return True
+
+        courses = pending.get("courses", [])
+        if t.isdigit():
+            idx = int(t)
+            if 1 <= idx <= len(courses):
+                usr.clear_pending(chat_id)
+                chosen = courses[idx - 1]
+                acr = course_acronym(chosen.get("name", "")) or chosen["code"]
+                course_label = f"{acr} ({chosen['code']})"
+                user = usr.get_user(chat_id)
+                lang = user.get("lang", "en") if user else "en"
+                _reply(chat_id, t("course_menu", lang, course=course_label))
                 return True
             else:
                 _reply(chat_id, f"Please pick a number between 1 and {len(courses)}.")
@@ -922,22 +1043,25 @@ def _handle_download_action(chat_id: str, lms, act: dict, lang: str):
     cq = act.get("course_query", "")
     week = act.get("week")
     tq = act.get("title_query", "")
+    is_latest = bool(act.get("latest", False))
 
     if not cq:
         courses = lms.get_courses()
+        usr.set_pending_action(chat_id, {"intent": "download", "latest": is_latest, "week": week, "title_query": tq})
         _reply(chat_id, t("course_not_found", lang, courses=format_course_list(courses)))
         return
 
     hits = resolve_course(lms, cq)
     if not hits:
         courses = lms.get_courses()
+        usr.set_pending_action(chat_id, {"intent": "download", "latest": is_latest, "week": week, "title_query": tq})
         _reply(chat_id, t("course_not_found", lang, courses=format_course_list(courses)))
         return
 
     remainder = f"week {week}" if week is not None else (tq or "")
 
     if len(hits) == 1:
-        _handle_download_for_course(chat_id, lms, hits[0], remainder)
+        _handle_download_for_course(chat_id, lms, hits[0], remainder, is_latest=is_latest, lang=lang)
     else:
         options = "\n".join(f"{i}. {c.get('code')} {c.get('name')}" for i, c in enumerate(hits, 1))
         usr.set_pending(chat_id, {
@@ -945,6 +1069,7 @@ def _handle_download_action(chat_id: str, lms, act: dict, lang: str):
             "courses": hits,
             "command": "download",
             "extra": remainder,
+            "is_latest": is_latest,
         })
         _reply(chat_id, t("which_course", lang, options=options))
 
@@ -952,6 +1077,20 @@ def _handle_download_action(chat_id: str, lms, act: dict, lang: str):
 def _execute_action(chat_id: str, lms, act: dict, lang: str):
     intent = act.get("intent")
     if intent == "courses":
+        cq = act.get("course_query")
+        if cq:
+            matches = resolve_course(lms, cq)
+            if len(matches) == 1:
+                course = matches[0]
+                acr = course_acronym(course.get("name", "")) or course["code"]
+                course_label = f"{acr} ({course['code']})"
+                _reply(chat_id, t("course_menu", lang, course=course_label))
+                return
+            elif len(matches) > 1:
+                options = "\n".join(f"{i}. {c.get('code')} {c.get('name')}" for i, c in enumerate(matches, 1))
+                usr.set_pending(chat_id, {"type": "course_menu", "courses": matches})
+                _reply(chat_id, t("which_course", lang, options=options))
+                return
         _reply(chat_id, cmd_courses(lms))
     elif intent == "assignments":
         _reply(chat_id, cmd_assignments(lms))
@@ -1055,12 +1194,12 @@ def _handle_natural_language(chat_id: str, text: str, user: dict, lms):
                 _maybe_send_help_fallback(chat_id, stored_lang, is_busy=is_busy)
             return
 
-    # Language tag update
-    resp_lang = parsed.get("lang", stored_lang)
-    if resp_lang and resp_lang != user.get("lang"):
-        usr.upsert_user(chat_id, lang=resp_lang)
-        user["lang"] = resp_lang
-    effective_lang = user.get("lang", "en")
+    # Language determination follows CURRENT message unless signal-less
+    detected_lang = detect_language(clean_text, stored_lang=stored_lang, is_recent=True)
+    if detected_lang and detected_lang != user.get("lang"):
+        usr.upsert_user(chat_id, lang=detected_lang)
+        user["lang"] = detected_lang
+    effective_lang = detected_lang or user.get("lang", "en")
 
     # Check unsupported from model (grades, marks, timetable, fees, results)
     if parsed.get("unsupported"):
@@ -1090,11 +1229,14 @@ def _handle_natural_language(chat_id: str, text: str, user: dict, lms):
     add_user_history(chat_id, clean_text)
 
     # Clarify
+    actions = parsed.get("actions", [])
     clarify = parsed.get("clarify")
     if clarify:
         if clarify == "course":
             courses = lms.get_courses()
             options = format_course_list(courses)
+            act_intent = actions[0].get("intent") if actions else "attendance"
+            usr.set_pending_action(chat_id, {"intent": act_intent})
             _reply(chat_id, t("which_course", effective_lang, options=options))
         elif clarify == "week":
             _reply(chat_id, t("which_week", effective_lang))
@@ -1102,7 +1244,6 @@ def _handle_natural_language(chat_id: str, text: str, user: dict, lms):
             _reply(chat_id, t("what", effective_lang))
         return
 
-    actions = parsed.get("actions", [])
     if not actions:
         return
 
@@ -1116,13 +1257,7 @@ def _handle_natural_language(chat_id: str, text: str, user: dict, lms):
             _reply(chat_id, t("greeting", effective_lang))
         actions = actions[1:]
 
-    has_lms_action = any(
-        a.get("intent") in ("courses", "assignments", "upcoming", "resources", "attendance", "clos", "download", "grades")
-        for a in actions
-    )
-    if has_lms_action:
-        _reply(chat_id, t("ack", effective_lang))
-
+    # NOTE: Separate ack message before data actions removed entirely (Part D)
     for act in actions:
         _execute_action(chat_id, lms, act, effective_lang)
 
@@ -1144,6 +1279,18 @@ def _handle_active(chat_id: str, text: str, user: dict):
         if _handle_pending(chat_id, lms, pending, text):
             return
 
+    # 1b. Selection reply guard when NO pending selection exists (or expired) (Part F)
+    t_strip = text.strip().lower()
+    tokens = [x for x in re.split(r"[\s,]+", text.strip()) if x]
+    is_selection_reply = (
+        t_strip in ("all", "cancel")
+        or (bool(tokens) and all(x.isdigit() for x in tokens))
+    )
+    if is_selection_reply:
+        lang = user.get("lang", "en")
+        _reply(chat_id, t("selection_expired", lang))
+        return
+
     # 2. Exact command check
     text_stripped = text.strip()
     word, _, arg = text_stripped.partition(" ")
@@ -1152,6 +1299,7 @@ def _handle_active(chat_id: str, text: str, user: dict):
 
     exact_cmds = {"download", "dl", "attendance", "resources", "clos", "courses", "assignments", "upcoming", "grades", "grade"}
     if word in exact_cmds:
+        usr.clear_pending_action(chat_id)
         try:
             _dispatch_exact_cmd(chat_id, lms, word, arg)
         except LMSAuthExpired:
@@ -1162,6 +1310,76 @@ def _handle_active(chat_id: str, text: str, user: dict):
             log.exception("Command failed for %s…", chat_id[-6:])
             _reply(chat_id, "Something went wrong talking to the LMS. Try again.")
         return
+
+    # 2b. Check pending action follow-up (Part C)
+    pending_act = usr.get_pending_action(chat_id)
+    if pending_act is not None:
+        c_query = clean_course_query(text)
+        matches = resolve_course(lms, c_query) if c_query else []
+        if matches:
+            usr.clear_pending_action(chat_id)
+            intent = pending_act.get("intent")
+            lang = detect_language(text, stored_lang=user.get("lang", "en"), is_recent=True)
+            if len(matches) == 1:
+                course = matches[0]
+                if intent == "download":
+                    is_latest = bool(pending_act.get("latest", False))
+                    week = pending_act.get("week")
+                    remainder = f"week {week}" if week is not None else pending_act.get("title_query", "")
+                    _handle_download_for_course(chat_id, lms, course, remainder, is_latest=is_latest, lang=lang)
+                elif intent == "attendance":
+                    _show_course_attendance(chat_id, lms, course, lms.get_attendance())
+                elif intent == "resources":
+                    _show_course_resources(chat_id, lms, course)
+                elif intent == "clos":
+                    _show_course_clos(chat_id, lms, course)
+                elif intent == "grades":
+                    _show_course_grades(chat_id, lms, course)
+                return
+            else:
+                options = "\n".join(f"{i}. {c.get('code')} {c.get('name')}" for i, c in enumerate(matches, 1))
+                usr.set_pending(chat_id, {
+                    "type": "course",
+                    "courses": matches,
+                    "command": intent,
+                    "extra": f"week {pending_act.get('week')}" if pending_act.get("week") is not None else pending_act.get("title_query", ""),
+                    "is_latest": bool(pending_act.get("latest", False)),
+                })
+                _reply(chat_id, t("which_course", lang, options=options))
+                return
+        else:
+            usr.clear_pending_action(chat_id)
+
+    # 2c. Course-only menu check (Part B: "Ai course", "Ai", "CC-311" alone, no pending action)
+    candidate_tokens = [re.sub(r"^[^\w]+|[^\w]+$", "", t) for t in text.strip().split()]
+    candidate_tokens = [t for t in candidate_tokens if t]
+    course_generic_words = {"course", "courses", "subject", "subjects", "class", "classes", "kors", "mazmoon", "کورس", "کورسز", "ڪورس", "ڪورسز", "مضمون", "ڪلاس", "کلاس"}
+    non_generic = [t for t in candidate_tokens if t.lower() not in course_generic_words]
+    c_cand = " ".join(non_generic) if non_generic else ""
+    if c_cand:
+        # Only treat as course-only menu if the message doesn't match an explicit action intent
+        rule_check = match_rules(text)
+        has_explicit_intent = rule_check and (
+            rule_check.get("unsupported")
+            or rule_check.get("off_topic")
+            or any(a.get("intent") in ("attendance", "download", "resources", "clos", "grades", "assignments", "upcoming", "help", "greeting")
+                   for a in rule_check.get("actions", []))
+        )
+        if not has_explicit_intent:
+            matches = resolve_course(lms, c_cand)
+            if len(matches) == 1:
+                course = matches[0]
+                acr = course_acronym(course.get("name", "")) or course["code"]
+                course_label = f"{acr} ({course['code']})"
+                lang = detect_language(text, stored_lang=user.get("lang", "en"), is_recent=True)
+                _reply(chat_id, t("course_menu", lang, course=course_label))
+                return
+            elif len(matches) > 1:
+                options = "\n".join(f"{i}. {c.get('code')} {c.get('name')}" for i, c in enumerate(matches, 1))
+                usr.set_pending(chat_id, {"type": "course_menu", "courses": matches})
+                lang = detect_language(text, stored_lang=user.get("lang", "en"), is_recent=True)
+                _reply(chat_id, t("which_course", lang, options=options))
+                return
 
     # 3. Lockout check (Part G)
     is_admin = bool(user.get("is_admin"))
@@ -1181,6 +1399,7 @@ def _handle_active(chat_id: str, text: str, user: dict):
 
 
 def _do_logout(chat_id: str):
+    usr.clear_pending_action(chat_id)
     usr.purge_user_data(chat_id)
     _reply(chat_id, 'Logged out and all your data deleted. Send "Hi TaleemGo AI" to start again.')
 

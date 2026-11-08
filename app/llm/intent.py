@@ -142,12 +142,18 @@ def validate_intent_response(data: dict, has_pending_download: bool = False) -> 
                 raise ValueError("At most 1 download action allowed")
 
         # Check allowed keys per action
-        allowed_act_keys = {"intent", "course_query", "title_query", "week", "numbers", "all", "cancel"}
+        allowed_act_keys = {"intent", "course_query", "title_query", "week", "numbers", "all", "cancel", "latest"}
         if not set(act.keys()).issubset(allowed_act_keys):
             unknown_act = set(act.keys()) - allowed_act_keys
             raise ValueError(f"Unknown action keys: {unknown_act}")
 
         val_act = {"intent": intent}
+
+        if "latest" in act and act["latest"] is not None:
+            lat = act["latest"]
+            if not isinstance(lat, bool):
+                raise ValueError(f"Invalid latest value: {lat}")
+            val_act["latest"] = lat
 
         if "course_query" in act and act["course_query"] is not None:
             cq = act["course_query"]
@@ -213,7 +219,7 @@ def build_system_prompt(
         "OUTPUT JSON SCHEMA:\n"
         "{\n"
         '  "lang": "<language tag: en, ur, ur-roman, sd, sd-roman, hi>",\n'
-        '  "actions": [ {"intent": "<intent>", "course_query": "<raw course phrase>", "week": <int 1-60>} ],\n'
+        '  "actions": [ {"intent": "<intent>", "course_query": "<raw course phrase>", "week": <int 1-60>, "latest": <bool>} ],\n'
         '  "clarify": null | "course" | "week" | "what",\n'
         '  "off_topic": false | true,\n'
         '  "unsupported": false | true\n'
