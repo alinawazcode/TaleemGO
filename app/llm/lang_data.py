@@ -388,6 +388,13 @@ STRINGS = {
         "calendar_no_deadlines": "You have no upcoming deadlines to add to your calendar.",
         "calendar_caption": "Here is your calendar file (.ics) with {count} upcoming deadline(s).",
         "login_failed_password": "Login failed, please send your LMS password again.",
+        "voice_signup_rejected": "Please type your email or password — voice notes are not accepted during sign-in.",
+        "voice_too_long": "Voice note too long (max {max_seconds}s). Please send a shorter note.",
+        "voice_too_large": "Voice note is too large. Please send a shorter note.",
+        "voice_rate_limit": "Too many voice notes. Please wait a while before sending another.",
+        "voice_wrong_mime": "Only voice notes are supported, not this file type.",
+        "voice_not_understood": "I couldn't make out that voice note. Please try again or type your message.",
+        "voice_heard": "🎤 I heard: \"{transcript}\"",
     },
     "ur": {
         "help": (
@@ -454,6 +461,13 @@ STRINGS = {
         "calendar_no_deadlines": "آپ کے کیلنڈر میں شامل کرنے کے لیے کوئی آنے والی ڈیڈ لائن نہیں ہے۔",
         "calendar_caption": "یہ رہا آپ کا کیلنڈر (.ics) فائل جس میں {count} ڈیڈ لائنز ہیں۔",
         "login_failed_password": "لاگ ان ناکام ہو گیا، براہ کرم اپنا LMS پاس ورڈ دوبارہ بھیجیں۔",
+        "voice_signup_rejected": "براہ کرم اپنا ای میل یا پاس ورڈ ٹائپ کریں — لاگ ان کے دوران وائس نوٹ قبول نہیں ہوتے۔",
+        "voice_too_long": "وائس نوٹ بہت لمبا ہے (زیادہ سے زیادہ {max_seconds} سیکنڈ)۔ براہ کرم چھوٹا نوٹ بھیجیں۔",
+        "voice_too_large": "وائس نوٹ بہت بڑا ہے۔ براہ کرم چھوٹا نوٹ بھیجیں۔",
+        "voice_rate_limit": "بہت زیادہ وائس نوٹس۔ براہ کرم تھوڑی دیر انتظار کریں۔",
+        "voice_wrong_mime": "صرف وائس نوٹس قبول ہوتے ہیں، یہ فائل قسم نہیں۔",
+        "voice_not_understood": "میں وائس نوٹ سمجھ نہیں سکا۔ دوبارہ کوشش کریں یا پیغام ٹائپ کریں۔",
+        "voice_heard": "🎤 میں نے سنا: \"{transcript}\"",
     },
     "sd": {
         "help": (
@@ -520,8 +534,27 @@ STRINGS = {
         "calendar_no_deadlines": "توهان جي ڪئلينڊر ۾ شامل ڪرڻ لاءِ ڪا به ايندڙ ڊيڊلائن ناهي.",
         "calendar_caption": "هي رهي توهان جي ڪئلينڊر (.ics) فائيل جنهن ۾ {count} ڊيڊلائنز آهن.",
         "login_failed_password": "لاگ ان ناڪام ٿي ويو، مهرباني ڪري پنهنجو LMS پاسورڊ ٻيهر موڪليو.",
+        "voice_signup_rejected": "مهرباني ڪري پنهنجو اي ميل يا پاسورڊ ٽائيپ ڪريو — لاگ ان وقت وائس نوٽس قبول نه ٿيندا.",
+        "voice_too_long": "وائس نوٽ تمام ڊگهو آهي (وڌ کان وڌ {max_seconds} سيڪنڊ). مهرباني ڪري ننڍو نوٽ موڪليو.",
+        "voice_too_large": "وائس نوٽ تمام وڏو آهي. مهرباني ڪري ننڍو نوٽ موڪليو.",
+        "voice_rate_limit": "تمام گهڻا وائس نوٽس. مهرباني ڪري ڪجهه دير انتظار ڪريو.",
+        "voice_wrong_mime": "صرف وائس نوٽس قبول ٿيندا آهن، هي فائيل قسم نه.",
+        "voice_not_understood": "مان وائس نوٽ سمجهي نه سگهيس. ٻيهر ڪوشش ڪريو يا پيغام ٽائيپ ڪريو.",
+        "voice_heard": "🎤 مون ٻڌو: \"{transcript}\"",
     },
 }
+
+# Built-in Roman Urdu voice strings (Latin letters only, no Urdu script)
+STRINGS.setdefault("ur-roman", {})
+STRINGS["ur-roman"].update({
+    "voice_signup_rejected": "Please type your email ya password — sign-in ke waqt voice notes accept nahi hote.",
+    "voice_too_long": "Voice note bahut lamba hai (max {max_seconds} seconds). Chota note bhejein.",
+    "voice_too_large": "Voice note bahut bada hai. Chota note bhejein.",
+    "voice_rate_limit": "Bahut zyada voice notes. Thodi der baad dobara bhejein.",
+    "voice_wrong_mime": "Sirf voice notes accept hote hain, yeh file type nahi.",
+    "voice_not_understood": "Main yeh voice note samajh nahi saka. Dobara koshish karein ya type karein.",
+    "voice_heard": "🎤 Maine suna: \"{transcript}\"",
+})
 
 # --- Few-Shot Prompt Examples ---
 

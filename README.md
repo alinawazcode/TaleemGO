@@ -56,6 +56,7 @@ Each WhatsApp number gets its own private session. One student's data never reac
 | Multi-user | Every WhatsApp number signs in with its own LMS email and password. The number of users is capped by `MAX_USERS` (default 5, including the admin's self-chat). |
 | Natural language | English, Urdu script, Roman Urdu, Sindhi, Roman Sindhi and Hindi, including mixed messages. The model only picks an intent. It never writes a reply. |
 | Commands | `courses`, `assignments`, `upcoming`, `grades`, `attendance`, `resources`, `clos` and `download`. They keep working when the AI is down. |
+| Voice notes | WhatsApp voice notes in English, Urdu, or Sindhi are transcribed via Groq Whisper with Gemini fallback. The bot replies with what it heard and runs the requested command. Audio is never saved to disk. |
 | Smart downloads | Ask for the latest lecture, a specific week, or a title. When a week has several files, the bot lists them and you reply with a number, several numbers, or `all`. Supported types: PDF, PPT, PPTX, DOC, DOCX and TXT, up to 100 MB. |
 | Automatic alerts | New lecture, new assignment, new or updated grade, attendance marked present or absent, and deadline reminders 3 days and 1 day before. |
 | Free AI with fallback | Gemini and Groq free tiers in an ordered chain. A rate-limited or retired model is skipped automatically. An offline keyword matcher answers when every provider fails. |
@@ -235,6 +236,17 @@ Each message has a 12 second budget, with 6 seconds per request. When a model re
 > Providers retire models often. If `llm` shows `bad model` for a provider, update `GEMINI_MODELS` or `GROQ_MODELS` in `.env`.
 > Current lists: [Gemini deprecations](https://ai.google.dev/gemini-api/docs/deprecations) and [Groq models](https://console.groq.com/docs/models).
 
+### 🎙️ Voice notes
+
+Registered students can send WhatsApp voice notes instead of typing. The bot transcribes the voice note and processes it with the exact same intent router and commands.
+
+- **Audio privacy**: Voice notes are processed purely in-memory as base64 bytes, never written to disk, and never stored. The transcript is never logged. Only audio duration, latency, and provider name appear in server logs.
+- **Transcripts**: The bot's reply begins with `🎤 I heard: "..."` so the student can verify what was heard.
+- **Languages supported**: Urdu, Sindhi, and English.
+- **Safety gates**: Voice notes are accepted only from registered, active, non-locked students. Voice notes sent during sign-up (`awaiting_email` or `awaiting_password`) are rejected with an explicit prompt to type credentials, and the audio is discarded immediately without calling any external service. Unknown numbers are silently ignored.
+- **Rate limits & thresholds**: Voice notes have a limit of 30 seconds (`VOICE_MAX_SECONDS=30`), ~2 MB raw audio (`VOICE_MAX_BYTES=2000000`), and 10 voice requests per hour per user (`VOICE_LIMIT_PER_HOUR=10`).
+- **STT providers**: Groq Whisper (`whisper-large-v3-turbo`) with automatic fallback to Gemini (`gemini-1.5-flash`). Configured via `STT_PROVIDERS=groq,gemini`.
+
 ### What the bot will not do
 
 TaleemGo AI is an LMS assistant, not a general chatbot.
@@ -251,6 +263,7 @@ TaleemGo AI is an LMS assistant, not a general chatbot.
 | Topic | How it is handled |
 |---|---|
 | Passwords | Used once to sign in. Never written to disk, never logged, never sent to a model provider. |
+| Voice audio | Held in memory only, never written to disk, never logged, deleted immediately after transcription. The transcript text is never logged. Sign-up states drop audio immediately. |
 | Sign-up messages | Emails and passwords skip the AI entirely. |
 | Model prompts | Contain the student's message text and a fixed instruction. They contain no course names, file titles, grades, attendance or chat ids. The model returns an intent and a raw course phrase. Python finds the course. |
 | Model output | Never sent to students. Only a whitelist of intents can run, so the model cannot trigger `logout`, `login`, `users` or `llm`. |
@@ -328,6 +341,12 @@ To change the bot's WhatsApp number, stop the bridge, delete `whatsapp_bridge/.w
 | `LLM_ADMIN_EXEMPT` | `1` | Exempt the admin from lockouts |
 | `LLM_HELP_REPLY_INTERVAL_MIN` | `2` | Minimum gap between "I didn't understand" replies |
 | `GREETING_REPLY` | `1` | Reply to greetings |
+| `STT_PROVIDERS` | `groq,gemini` | Ordered STT providers for voice transcription |
+| `GROQ_STT_MODELS` | `whisper-large-v3-turbo` | Whisper model(s) for Groq STT |
+| `GEMINI_STT_MODELS` | `gemini-1.5-flash` | Gemini model(s) for STT fallback |
+| `VOICE_MAX_SECONDS` | `30` | Maximum voice note duration in seconds |
+| `VOICE_MAX_BYTES` | `2000000` | Maximum raw voice note audio bytes (~2 MB) |
+| `VOICE_LIMIT_PER_HOUR` | `10` | Maximum voice notes per user per hour |
 
 `SATHI_SECRET_KEY` from older versions is still read. Rename it to `TALEEMGO_SECRET_KEY` and keep the same value, because a new key makes saved sessions unreadable and every student would have to sign in again.
 
@@ -340,7 +359,7 @@ To change the bot's WhatsApp number, stop the bridge, delete `whatsapp_bridge/.w
 The unit tests run offline with fake providers and a fake LMS. Run them from the project folder:
 
 ```bash
-python -m unittest app/test_branding.py app/test_multiuser.py app/test_grades.py app/test_llm.py app/test_professional.py
+python -m unittest app/test_branding.py app/test_multiuser.py app/test_grades.py app/test_llm.py app/test_professional.py app/test_relogin.py app/test_helpers.py app/test_voice.py
 ```
 
 | File | Covers |
@@ -350,6 +369,9 @@ python -m unittest app/test_branding.py app/test_multiuser.py app/test_grades.py
 | `test_grades.py` | Grade maths, grade alerts, a guard that keeps sensitive LMS columns out of the code |
 | `test_professional.py` | Conversation flow: latest lecture, follow-ups, language, empty-reply guards |
 | `test_branding.py` | No leftover product names |
+| `test_relogin.py` | Re-login with stale tokens and monitor/bridge resilience |
+| `test_helpers.py` | Attendance planner, daily digest, and calendar export |
+| `test_voice.py` | Voice note transcription, audio gates, rate limits, STT failover, privacy |
 
 The multi-user suite includes a bridge test, so run `npm install` in `whatsapp_bridge` first. `app/test_all.py` is a manual smoke test against a real LMS account and is not part of the unit suite.
 
@@ -370,6 +392,7 @@ app/
   llm/
     providers.py     Provider calls, cooldowns, model failover
     router.py        Provider chain and time budget
+    stt.py           Voice note speech-to-text with Groq and Gemini fallback
     intent.py        Prompt, JSON schema, validation
     rules.py         Offline matcher and language detection
     i18n.py          Fixed replies in English, Urdu and Sindhi, with cache
