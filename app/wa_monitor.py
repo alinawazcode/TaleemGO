@@ -4,8 +4,10 @@ check_updates(user) handles one user dict (chat_id, email).
 The scheduler job in wa_bot.py calls run_all_users() which loops sequentially.
 """
 import logging
+import os
 from datetime import datetime, timezone
 
+import requests
 from lms_client import LMSAuthExpired
 from state import load_state, save_state
 from timeutils import to_local
@@ -45,22 +47,24 @@ def check_updates(user: dict):
 
 
 def _run_for_user(chat_id: str):
+    user = usr.get_user(chat_id)
+    if not user or user.get("status") != "active":
+        return
+
     udir = usr.user_dir(chat_id)
-    lms = usr.get_client(chat_id)
-    if lms is None:
-        from lms_client import LMSClient
-        tf = usr.token_file(chat_id)
-        import os
-        if not os.path.exists(tf):
-            log.warning("No token file for %s…, skipping", chat_id[-6:])
-            return
-        lms = LMSClient(token_file=tf)
-        usr.set_client(chat_id, lms)
-
-    state = load_state(udir)
-    first_run = not state.get("seeded", False)
-
     try:
+        lms = usr.get_client(chat_id)
+        if lms is None:
+            from lms_client import LMSClient
+            tf = usr.token_file(chat_id)
+            if not os.path.exists(tf):
+                log.warning("No token file for %s…, skipping", chat_id[-6:])
+                return
+            lms = LMSClient(token_file=tf)
+            usr.set_client(chat_id, lms)
+
+        state = load_state(udir)
+        first_run = not state.get("seeded", False)
         courses = {c["id"]: c for c in lms.get_courses()}
 
         resources = lms.get_resources()
@@ -211,12 +215,17 @@ def _run_for_user(chat_id: str):
 
     except LMSAuthExpired:
         log.warning("Session expired for %s…", chat_id[-6:])
+        prev_status = user.get("status") if user else None
         usr.upsert_user(chat_id, status="expired")
         usr.remove_client(chat_id)
-        try:
-            wa.send_text(chat_id, "Your LMS session has expired. Send `login` to sign in again.")
-        except Exception:
-            pass
+        usr.delete_token_file(chat_id)
+        if prev_status == "active":
+            try:
+                wa.send_text(chat_id, "Your LMS session has expired. Send `login` to sign in again.")
+            except Exception:
+                pass
+    except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as e:
+        log.warning("LMS network error for %s…: %s — skipping until next cycle", chat_id[-6:], e)
     except Exception:
         log.exception("Monitor run failed for %s… — will retry next cycle", chat_id[-6:])
 
@@ -225,7 +234,10 @@ def run_all_users():
     """Called by the scheduler. Loops over all active users sequentially."""
     usr.cleanup_stale_signups()
     for user in usr.all_active_users():
+        u = usr.get_user(user.get("chat_id", ""))
+        if not u or u.get("status") != "active":
+            continue
         try:
-            check_updates(user)
+            check_updates(u)
         except Exception:
             log.exception("Unexpected error for user %s…", user.get("chat_id", "?")[-6:])

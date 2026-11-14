@@ -353,6 +353,7 @@ STRINGS = {
         "no_grades_posted": "No grades posted yet",
         "graded_so_far": "Graded so far: {obtained}/{max_total} ({graded} of {total} graded)",
         "grades_heading": "{course} Grades",
+        "login_failed_password": "Login failed, please send your LMS password again.",
     },
     "ur": {
         "help": (
@@ -397,6 +398,7 @@ STRINGS = {
         "no_grades_posted": "ابھی تک کوئی گریڈ جاری نہیں ہوا",
         "graded_so_far": "اب تک کے گریڈ: {obtained}/{max_total} ({total} میں سے {graded} گریڈ ہو چکے)",
         "grades_heading": "{course} گریڈز",
+        "login_failed_password": "لاگ ان ناکام ہو گیا، براہ کرم اپنا LMS پاس ورڈ دوبارہ بھیجیں۔",
     },
     "sd": {
         "help": (
@@ -441,6 +443,7 @@ STRINGS = {
         "no_grades_posted": "اڃا ڪو گريڊ پوسٽ نه ٿيو آهي",
         "graded_so_far": "هاڻي تائين جا گريڊ: {obtained}/{max_total} ({total} مان {graded} گريڊ ٿيل)",
         "grades_heading": "{course} گريڊ",
+        "login_failed_password": "لاگ ان ناڪام ٿي ويو، مهرباني ڪري پنهنجو LMS پاسورڊ ٻيهر موڪليو.",
     },
 }
 

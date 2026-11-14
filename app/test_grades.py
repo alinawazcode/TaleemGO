@@ -42,13 +42,13 @@ class MockLMSForGrades:
         ]
         self._assignments = assignments if assignments is not None else [
             {"id": "asgn_1", "course_id": "c_nlp", "title": "Homework 1", "week_number": 1,
-             "max_marks": 10.0, "is_extra_credit": False, "include_in_total": True, "due_date": "2026-11-15T18:00:00Z"},
+             "max_marks": 10.0, "is_extra_credit": False, "include_in_total": True, "due_date": "2029-11-15T18:00:00Z"},
             {"id": "asgn_2", "course_id": "c_nlp", "title": "Project Phase 1", "week_number": 3,
-             "max_marks": 20.0, "is_extra_credit": False, "include_in_total": True, "due_date": "2026-11-20T18:00:00Z"},
+             "max_marks": 20.0, "is_extra_credit": False, "include_in_total": True, "due_date": "2029-11-20T18:00:00Z"},
             {"id": "asgn_3", "course_id": "c_hci", "title": "HCI Heuristic Eval", "week_number": 2,
-             "max_marks": 15.0, "is_extra_credit": False, "include_in_total": True, "due_date": "2026-11-18T18:00:00Z"},
+             "max_marks": 15.0, "is_extra_credit": False, "include_in_total": True, "due_date": "2029-11-18T18:00:00Z"},
             {"id": "asgn_4", "course_id": "c_ds", "title": "Kaggle Sprint", "week_number": 1,
-             "max_marks": 50.0, "is_extra_credit": False, "include_in_total": True, "due_date": "2026-11-25T18:00:00Z"},
+             "max_marks": 50.0, "is_extra_credit": False, "include_in_total": True, "due_date": "2029-11-25T18:00:00Z"},
         ]
         self._submissions = submissions if submissions is not None else {
             "asgn_1": {"assignment_id": "asgn_1", "grade": 8.5, "max_marks": 10.0, "file_name": "hw1.pdf",
@@ -585,10 +585,10 @@ class TestMonitorGradeAlerts(BaseGradesTestCase):
 
         # 3 already-graded items + 1 ungraded
         assignments = [
-            {"id": "a1", "course_id": "c_nlp", "title": "HW 1", "max_marks": 10.0, "is_extra_credit": False, "include_in_total": True, "due_date": "2026-11-15T18:00:00Z"},
-            {"id": "a2", "course_id": "c_nlp", "title": "HW 2", "max_marks": 10.0, "is_extra_credit": False, "include_in_total": True, "due_date": "2026-11-16T18:00:00Z"},
-            {"id": "a3", "course_id": "c_nlp", "title": "HW 3", "max_marks": 10.0, "is_extra_credit": False, "include_in_total": True, "due_date": "2026-11-17T18:00:00Z"},
-            {"id": "a4", "course_id": "c_nlp", "title": "HW 4", "max_marks": 20.0, "is_extra_credit": False, "include_in_total": True, "due_date": "2026-11-18T18:00:00Z"},
+            {"id": "a1", "course_id": "c_nlp", "title": "HW 1", "max_marks": 10.0, "is_extra_credit": False, "include_in_total": True, "due_date": "2029-11-15T18:00:00Z"},
+            {"id": "a2", "course_id": "c_nlp", "title": "HW 2", "max_marks": 10.0, "is_extra_credit": False, "include_in_total": True, "due_date": "2029-11-16T18:00:00Z"},
+            {"id": "a3", "course_id": "c_nlp", "title": "HW 3", "max_marks": 10.0, "is_extra_credit": False, "include_in_total": True, "due_date": "2029-11-17T18:00:00Z"},
+            {"id": "a4", "course_id": "c_nlp", "title": "HW 4", "max_marks": 20.0, "is_extra_credit": False, "include_in_total": True, "due_date": "2029-11-18T18:00:00Z"},
         ]
         submissions = {
             "a1": {"assignment_id": "a1", "grade": 10.0, "max_marks": 10.0, "file_name": "a1.pdf", "graded_at": "2026-11-01T00:00:00Z"},

@@ -198,6 +198,9 @@ journalctl -u taleemgo-api -u taleemgo-bridge -f
 sudo systemctl restart taleemgo-api taleemgo-bridge
 ```
 
+> [!NOTE]
+> On the Linux VM, `systemd` (`Restart=always` in `taleemgo-bridge.service`) automatically restarts the bridge service if Chrome crashes or exits. For local Windows development, `whatsapp_bridge/run-bridge.cmd` provides the same auto-restart behavior in a 5-second loop.
+
 ### Apply Software Updates
 
 To pull the latest Git commits and refresh packages:
