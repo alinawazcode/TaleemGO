@@ -387,6 +387,7 @@ STRINGS = {
         "digest_att_ok": "All course attendances are above {warn}%.",
         "calendar_no_deadlines": "You have no upcoming deadlines to add to your calendar.",
         "calendar_caption": "Here is your calendar file (.ics) with {count} upcoming deadline(s).",
+        "login_failed_password": "Login failed, please send your LMS password again.",
     },
     "ur": {
         "help": (
@@ -452,6 +453,7 @@ STRINGS = {
         "digest_att_ok": "تمام کورسز کی حاضری {warn}% سے اوپر ہے۔",
         "calendar_no_deadlines": "آپ کے کیلنڈر میں شامل کرنے کے لیے کوئی آنے والی ڈیڈ لائن نہیں ہے۔",
         "calendar_caption": "یہ رہا آپ کا کیلنڈر (.ics) فائل جس میں {count} ڈیڈ لائنز ہیں۔",
+        "login_failed_password": "لاگ ان ناکام ہو گیا، براہ کرم اپنا LMS پاس ورڈ دوبارہ بھیجیں۔",
     },
     "sd": {
         "help": (
@@ -517,6 +519,7 @@ STRINGS = {
         "digest_att_ok": "سڀني ڪورسز جي حاضري {warn}% کان مٿي آهي.",
         "calendar_no_deadlines": "توهان جي ڪئلينڊر ۾ شامل ڪرڻ لاءِ ڪا به ايندڙ ڊيڊلائن ناهي.",
         "calendar_caption": "هي رهي توهان جي ڪئلينڊر (.ics) فائيل جنهن ۾ {count} ڊيڊلائنز آهن.",
+        "login_failed_password": "لاگ ان ناڪام ٿي ويو، مهرباني ڪري پنهنجو LMS پاسورڊ ٻيهر موڪليو.",
     },
 }
 

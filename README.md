@@ -160,6 +160,9 @@ cd whatsapp_bridge
 npm start
 ```
 
+> [!TIP]
+> On Windows development environments, you can run `run-bridge.cmd` (inside `whatsapp_bridge/`) instead of `npm start`. It automatically restarts the bridge in a loop with a 5-second delay if Chrome crashes or exits.
+
 Scan the QR code in terminal 2 with WhatsApp on the bot's phone: Settings, Linked devices, Link a device. Wait for `WhatsApp ready`. The session is saved in `whatsapp_bridge/.wwebjs_auth`, so you scan once.
 
 ### 4. Sign in as a student

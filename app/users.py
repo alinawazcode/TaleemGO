@@ -16,7 +16,10 @@ Responsibilities:
 import hashlib
 import logging
 import os
+import shutil
 import sqlite3
+import stat
+import sys
 import threading
 import time
 from typing import Optional
@@ -108,6 +111,21 @@ def user_dir(chat_id: str) -> str:
 
 def token_file(chat_id: str) -> str:
     return os.path.join(user_dir(chat_id), "tokens.enc")
+
+
+def delete_token_file(chat_id: str):
+    """Explicitly delete user token file and temporary token file."""
+    tf = token_file(chat_id)
+    for p in (tf, tf + ".tmp"):
+        try:
+            if os.path.exists(p):
+                try:
+                    os.chmod(p, stat.S_IWRITE | 0o666)
+                except Exception:
+                    pass
+                os.remove(p)
+        except Exception as e:
+            log.warning("Could not remove token file %s: %s", os.path.basename(p), e)
 
 
 def user_downloads_dir(chat_id: str) -> str:
@@ -310,9 +328,46 @@ def remove_client(chat_id: str):
         _client_cache.pop(chat_id, None)
 
 
+def _handle_remove_readonly(func, path, exc_info):
+    """Clear readonly bit and retry deletion (Windows support)."""
+    try:
+        os.chmod(path, stat.S_IWRITE | 0o666)
+        func(path)
+    except Exception:
+        pass
+
+
+def _rmtree_with_retry(path: Path, tries: int = 3, delay: float = 0.05):
+    for attempt in range(tries):
+        if not path.exists():
+            return
+        try:
+            if sys.version_info >= (3, 12):
+                def _on_exc(func, p, exc):
+                    _handle_remove_readonly(func, p, (type(exc), exc, exc.__traceback__))
+                shutil.rmtree(path, onexc=_on_exc)
+            else:
+                shutil.rmtree(path, onerror=_handle_remove_readonly)
+        except Exception:
+            pass
+        if not path.exists():
+            return
+        time.sleep(delay)
+
+    if path.exists():
+        leftovers = []
+        for root, dirs, files in os.walk(path):
+            for fname in files:
+                leftovers.append(fname)
+        if leftovers:
+            for fname in leftovers:
+                log.warning("Leftover file after purge: %s", fname)
+        else:
+            log.warning("Leftover directory after purge: %s", path.name)
+
+
 def purge_user_data(chat_id: str):
     """Delete DB row, in-memory client and lock, pending choice, history, strikes, and all files for this user."""
-    import shutil
     delete_user(chat_id)
     clear_pending(chat_id)
     clear_pending_action(chat_id)
@@ -329,9 +384,15 @@ def purge_user_data(chat_id: str):
     with _cache_lock:
         _client_cache.pop(chat_id, None)
         _client_locks.pop(chat_id, None)
+
+    # Explicitly remove the token file (and .tmp) first
+    delete_token_file(chat_id)
+
+    # Remove user directory with retries and read-only handling
     d = USERS_DIR / _slug(chat_id)
     if d.exists():
-        shutil.rmtree(d, ignore_errors=True)
+        _rmtree_with_retry(d)
+
     log.info("Purged all data for chat %s…", chat_id[-6:])
 
 
