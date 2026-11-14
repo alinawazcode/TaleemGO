@@ -51,16 +51,21 @@ class LMSAuthExpired(LMSError):
     pass
 
 
+_deprecated_key_logged = False
+
+
 def _fernet():
     """Return a Fernet instance, generating+saving TALEEMGO_SECRET_KEY if missing (falls back to SATHI_SECRET_KEY)."""
+    global _deprecated_key_logged
     from cryptography.fernet import Fernet
     import logging
     log = logging.getLogger("taleemgo.lms")
     key = os.environ.get("TALEEMGO_SECRET_KEY", "")
     if not key:
         key = os.environ.get("SATHI_SECRET_KEY", "")
-        if key:
+        if key and not _deprecated_key_logged:
             log.info("Using deprecated SATHI_SECRET_KEY; please rename to TALEEMGO_SECRET_KEY in .env")
+            _deprecated_key_logged = True
     if not key:
         key = Fernet.generate_key().decode()
         env_path = ROOT_DIR / ".env"
@@ -73,7 +78,7 @@ def _fernet():
 
 
 class LMSClient:
-    def __init__(self, email=None, password=None, token_file=None):
+    def __init__(self, email=None, password=None, token_file=None, load_tokens: bool = True):
         self.supabase_url = os.environ["SUPABASE_URL"].rstrip("/")
         self.api_key = os.environ["SUPABASE_ANON_KEY"]
         self.lms_url = os.environ["LMS_BASE_URL"].rstrip("/")
@@ -90,7 +95,8 @@ class LMSClient:
         self.web = requests.Session()
         self.web.headers["User-Agent"] = "Mozilla/5.0"
 
-        self._load_tokens()
+        if load_tokens:
+            self._load_tokens()
 
     # ---------- encryption helpers ----------
 
@@ -414,7 +420,19 @@ class LMSClient:
     @classmethod
     def login_once(cls, email, password, token_file=None):
         """Create a fresh client, log in, return it. Raises requests.HTTPError on bad credentials."""
-        client = cls(email=email, password=password, token_file=token_file)
+        # Always start fresh: remove any existing token file (and .tmp) so stale tokens never clear password
+        if token_file:
+            for tf_path in (token_file, token_file + ".tmp"):
+                try:
+                    if os.path.exists(tf_path):
+                        try:
+                            os.chmod(tf_path, 0o666)
+                        except Exception:
+                            pass
+                        os.remove(tf_path)
+                except Exception:
+                    pass
+        client = cls(email=email, password=password, token_file=token_file, load_tokens=False)
         client.login()          # raises HTTPError on 400/401
         return client
 

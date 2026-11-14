@@ -862,6 +862,8 @@ def _handle_locked(chat_id: str, text: str, is_self: bool = False):
             if not usr.try_register(chat_id, is_admin=False):
                 _reply(chat_id, f"TaleemGo AI is full right now ({MAX_USERS}/{MAX_USERS} users). Please try again later.")
                 return
+            usr.remove_client(chat_id)
+            usr.delete_token_file(chat_id)
             _reply(chat_id, WELCOME)
             return
         else:
@@ -869,6 +871,8 @@ def _handle_locked(chat_id: str, text: str, is_self: bool = False):
             if not usr.try_register(chat_id, is_admin=True):
                 _reply(chat_id, f"TaleemGo AI is full right now ({MAX_USERS}/{MAX_USERS} users). Please try again later.")
                 return
+            usr.remove_client(chat_id)
+            usr.delete_token_file(chat_id)
             _reply(chat_id, WELCOME)
             return
 
@@ -914,12 +918,16 @@ def _handle_locked(chat_id: str, text: str, is_self: bool = False):
     elif status == "active":
         _handle_active(chat_id, text, user)
     elif status == "expired":
+        usr.remove_client(chat_id)
+        usr.delete_token_file(chat_id)
         _reply(chat_id, "Your session has expired. Send `login` to sign in again.")
     else:
         _reply(chat_id, WELCOME)
 
 
 def _handle_awaiting_email(chat_id: str, text: str):
+    usr.remove_client(chat_id)
+    usr.delete_token_file(chat_id)
     if not re.match(r"^[^@\s]+@[^@\s]+\.[^@\s]+$", text):
         _reply(chat_id, "That doesn't look like an email address. Please send your LMS email.")
         return
@@ -933,8 +941,13 @@ def _handle_awaiting_password(chat_id: str, user: dict, text: str):
     # IMPORTANT: never log text here
     email = user["email"]
     tf = usr.token_file(chat_id)
+    lang = user.get("lang", "en") if user else "en"
     try:
         lms = LMSClient.login_once(email=email, password=text, token_file=tf)
+    except LMSAuthExpired as e:
+        log.warning("Login failed for %s…: %s", chat_id[-6:], e)
+        _reply(chat_id, t("login_failed_password", lang))
+        return
     except requests.HTTPError as e:
         status_code = getattr(e.response, "status_code", None)
         if status_code in (400, 401):
@@ -949,6 +962,10 @@ def _handle_awaiting_password(chat_id: str, user: dict, text: str):
         else:
             log.warning("LMS HTTP error %s for %s…", status_code, chat_id[-6:])
             _reply(chat_id, "LMS is unreachable right now, please try again in a few minutes.")
+        return
+    except (requests.ConnectionError, requests.Timeout) as e:
+        log.warning("LMS network error for %s…: %s", chat_id[-6:], e)
+        _reply(chat_id, "LMS is unreachable right now, please try again in a few minutes.")
         return
     except Exception:
         log.exception("LMS connection failed for %s…", chat_id[-6:])
@@ -1392,6 +1409,7 @@ def _handle_active(chat_id: str, text: str, user: dict):
     except LMSAuthExpired:
         usr.upsert_user(chat_id, status="expired")
         usr.remove_client(chat_id)
+        usr.delete_token_file(chat_id)
         _reply(chat_id, "Your LMS session expired. Send `login` to sign in again.")
     except Exception:
         log.exception("Natural language handling failed for %s…", chat_id[-6:])
@@ -1405,10 +1423,13 @@ def _do_logout(chat_id: str):
 
 
 def _do_login_reset(chat_id: str):
+    usr.clear_pending(chat_id)
+    usr.clear_pending_action(chat_id)
+    usr.remove_client(chat_id)
+    usr.delete_token_file(chat_id)
     user = usr.get_user(chat_id)
     if user:
         usr.upsert_user(chat_id, status="awaiting_email", attempt=0)
-        usr.remove_client(chat_id)
         _reply(chat_id, "Please send your LMS email to sign in.")
     else:
         if not usr.try_register(chat_id, is_admin=False):

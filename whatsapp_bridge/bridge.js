@@ -174,6 +174,18 @@ function removeStaleSingletonLocks() {
   }
 }
 
+const FATAL_BROWSER_ERRORS = [
+  "detached Frame",
+  "Target closed",
+  "Session closed",
+  "Execution context was destroyed",
+];
+
+function isFatalBrowserError(errMsg) {
+  if (!errMsg || typeof errMsg !== "string") return false;
+  return FATAL_BROWSER_ERRORS.some((pattern) => errMsg.includes(pattern));
+}
+
 if (require.main === module) {
   killStaleChrome();
   removeStaleSingletonLocks();
@@ -300,6 +312,10 @@ if (require.main === module) {
     } catch (e) {
       console.error("[SEND ERROR]", e.message);
       res.status(500).json({ error: e.message });
+      if (isFatalBrowserError(e.message)) {
+        console.error("[FATAL] browser page died, exiting for restart");
+        process.exit(1);
+      }
     }
   });
 
@@ -314,6 +330,10 @@ if (require.main === module) {
     } catch (e) {
       console.error("[SEND-FILE ERROR]", e.message);
       res.status(500).json({ error: e.message });
+      if (isFatalBrowserError(e.message)) {
+        console.error("[FATAL] browser page died, exiting for restart");
+        process.exit(1);
+      }
     }
   });
 
@@ -360,4 +380,4 @@ if (require.main === module) {
   app.listen(PORT, "127.0.0.1", () => console.log(`Bridge on 127.0.0.1:${PORT}`));
 }
 
-module.exports = { isSelfChat, ADMIN_NUMBER };
+module.exports = { isSelfChat, ADMIN_NUMBER, isFatalBrowserError, FATAL_BROWSER_ERRORS };

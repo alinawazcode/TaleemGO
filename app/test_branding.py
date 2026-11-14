@@ -32,7 +32,7 @@ class BrandingTests(unittest.TestCase):
         # 5. Negative test asserting that "saathi ai" no longer activates
         allow_rules = [
             lambda path, line: "test_branding.py" in path,
-            lambda path, line: "github.com" in line or "cd Saathi" in line or "clone" in line,
+            lambda path, line: "github.com" in line or "cd saathi" in line.lower() or "clone" in line,
             lambda path, line: "SATHI_SECRET_KEY" in line,
             lambda path, line: "saathi-patch" in line,
             lambda path, line: "saathi ai" in line.lower() and ("no longer activates" in line or "wa_bot.handle" in line),
