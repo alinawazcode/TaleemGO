@@ -26,6 +26,7 @@ load_dotenv(os.path.join(os.path.dirname(__file__), "..", ".env"))
 
 from courses import _edit_distance_1, clean_course_query, course_acronym, format_course_list, resolve_course  # noqa: E402
 from lms_client import LMSClient, LMSAuthExpired, LMSError, summarize_grades  # noqa: E402
+import timeutils                                                        # noqa: E402
 from timeutils import to_local, get_local_now, get_local_date_and_time  # noqa: E402
 from calendar_gen import generate_calendar_ics                          # noqa: E402
 from planner import calculate_attendance_plan, calculate_miss_what_if, get_default_target  # noqa: E402
@@ -686,11 +687,13 @@ def check_daily_digests(now_dt: Optional[datetime] = None):
             log.exception("Daily digest failed for %s…", chat_id[-6:])
 
 
-def _handle_calendar_cmd(chat_id: str, lms, arg: str = ""):
+def _handle_calendar_cmd(chat_id: str, lms, arg: str = "", now_dt=None):
     user = usr.get_user(chat_id)
     lang = user.get("lang", "en") if user else "en"
     asgns = lms.get_assignments()
     subs = lms.get_submissions()
+
+    local_now = timeutils.get_local_now(now_dt)
 
     pending = []
     for a in asgns:
@@ -698,7 +701,14 @@ def _handle_calendar_cmd(chat_id: str, lms, arg: str = ""):
         sub = subs.get(aid)
         if sub and (sub.get("submitted_at") or sub.get("file_name")):
             continue
-        if a.get("due_date"):
+        due_raw = a.get("due_date")
+        if not due_raw:
+            continue
+        try:
+            due_dt = datetime.fromisoformat(due_raw.replace("Z", "+00:00")).astimezone(local_now.tzinfo)
+        except Exception:
+            continue
+        if due_dt > local_now:
             pending.append(a)
 
     courses = {c["id"]: c for c in lms.get_courses()}

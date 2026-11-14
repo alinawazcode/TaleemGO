@@ -171,12 +171,13 @@ def t(key: str, lang: str = "en", **kwargs) -> str:
         except Exception:
             return template if template.strip() else None
 
-    # 1. Built-in languages
-    if clean_lang in ("en", "ur", "sd"):
-        lang_template = STRINGS.get(clean_lang, {}).get(key)
+    # 1. Built-in languages and table entries
+    lang_template = STRINGS.get(clean_lang, {}).get(key)
+    if lang_template:
         res = _format(lang_template)
         if res:
             return res
+    if clean_lang in ("en", "ur", "sd"):
         fallback = _format(en_template)
         return fallback if fallback else key
 

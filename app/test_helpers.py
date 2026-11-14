@@ -32,6 +32,7 @@ import users as usr
 import wa_bot
 import wa_transport
 from llm.intent import ALLOWED_INTENTS, validate_intent_response
+from llm.i18n import t
 from llm.lang_data import STRINGS
 from llm.rules import match_rules
 
@@ -251,7 +252,7 @@ class TestDailyDigest(BaseHelperTestCase):
         self.assertEqual(len(self.sent_texts), 2)
         status_reply, digest_reply = self.sent_texts[0][1], self.sent_texts[1][1]
         self.assertIn("Daily digest is OFF", status_reply)
-        self.assertIn("Good morning! Here is your TaleemGo AI daily digest", digest_reply)
+        self.assertIn("Here is your TaleemGo AI daily digest", digest_reply)
 
         # 2. digest on 25:99 -> invalid time
         self.sent_texts.clear()
@@ -304,7 +305,7 @@ class TestDailyDigest(BaseHelperTestCase):
         t2 = datetime(2026, 11, 14, 7, 30, 0, tzinfo=tz)
         wa_bot.check_daily_digests(now_dt=t2)
         self.assertEqual(len(self.sent_texts), 1)
-        self.assertIn("Good morning!", self.sent_texts[0][1])
+        self.assertIn("Here is your TaleemGo AI daily digest", self.sent_texts[0][1])
 
         # Verify DB recorded last sent date
         u = usr.get_user(chat_id)
@@ -490,6 +491,77 @@ class TestCalendarFile(BaseHelperTestCase):
         self.assertIsNotNone(r3)
         self.assertEqual(r3["actions"][0]["intent"], "calendar")
 
+    def test_calendar_excludes_past_due_and_submitted_items(self):
+        chat_id = "cal_filter@c.us"
+        usr.upsert_user(chat_id, email="filter@test.com", status="active")
+
+        # Fixed reference time: 2026-11-14 12:00:00 (Asia/Karachi)
+        ref_now = datetime(2026, 11, 14, 12, 0, 0, tzinfo=timeutils.LOCAL_TZ)
+
+        lms = MockLMSForHelpers(
+            assignments=[
+                # 1. Future & unsubmitted -> INCLUDED
+                {"id": "a_future", "course_id": "c_ai", "title": "Future Unsubmitted Project", "due_date": "2026-11-20T18:00:00Z"},
+                # 2. Past due & unsubmitted -> EXCLUDED
+                {"id": "a_past", "course_id": "c_ai", "title": "Past Due Assignment", "due_date": "2026-11-10T18:00:00Z"},
+                # 3. Future & submitted via submitted_at -> EXCLUDED
+                {"id": "a_sub_date", "course_id": "c_ai", "title": "Submitted Assignment 1", "due_date": "2026-11-18T18:00:00Z"},
+                # 4. Future & submitted via file_name -> EXCLUDED
+                {"id": "a_sub_file", "course_id": "c_ai", "title": "Submitted Assignment 2", "due_date": "2026-11-19T18:00:00Z"},
+                # 5. Missing due date -> EXCLUDED
+                {"id": "a_no_date", "course_id": "c_ai", "title": "No Due Date Task", "due_date": None},
+            ],
+            submissions={
+                "a_sub_date": {"submitted_at": "2026-11-13T10:00:00Z", "file_name": None},
+                "a_sub_file": {"submitted_at": None, "file_name": "solution.pdf"},
+            },
+        )
+        usr.set_client(chat_id, lms)
+
+        ics_captured = []
+        orig_sf = wa_transport.send_file
+        def capture_and_record(cid, p, caption=""):
+            with open(p, "r", encoding="utf-8") as f:
+                ics_captured.append(f.read())
+            orig_sf(cid, p, caption)
+
+        wa_transport.send_file = capture_and_record
+        try:
+            wa_bot._handle_calendar_cmd(chat_id, lms, now_dt=ref_now)
+        finally:
+            wa_transport.send_file = orig_sf
+
+        self.assertEqual(len(self.sent_files), 1)
+        cid, path, caption = self.sent_files[0]
+        self.assertEqual(cid, chat_id)
+        self.assertIn("1 upcoming deadline(s)", caption)
+
+        self.assertEqual(len(ics_captured), 1)
+        ics_text = ics_captured[0]
+        self.assertIn("Future Unsubmitted Project", ics_text)
+        self.assertIn("assignment-a_future@taleemgo", ics_text)
+        self.assertNotIn("Past Due Assignment", ics_text)
+        self.assertNotIn("assignment-a_past@taleemgo", ics_text)
+        self.assertNotIn("Submitted Assignment 1", ics_text)
+        self.assertNotIn("Submitted Assignment 2", ics_text)
+        self.assertNotIn("No Due Date Task", ics_text)
+
+        # When all assignments are either past-due or already submitted
+        self.sent_files.clear()
+        self.sent_texts.clear()
+        lms_only_past_or_sub = MockLMSForHelpers(
+            assignments=[
+                {"id": "a_past", "course_id": "c_ai", "title": "Past Due", "due_date": "2026-11-10T18:00:00Z"},
+                {"id": "a_sub", "course_id": "c_ai", "title": "Submitted", "due_date": "2026-11-20T18:00:00Z"},
+            ],
+            submissions={"a_sub": {"file_name": "f.pdf"}},
+        )
+        usr.set_client(chat_id, lms_only_past_or_sub)
+        wa_bot._handle_calendar_cmd(chat_id, lms_only_past_or_sub, now_dt=ref_now)
+        self.assertEqual(len(self.sent_files), 0, "No file sent when all items past due or submitted")
+        self.assertEqual(len(self.sent_texts), 1)
+        self.assertIn("no upcoming deadlines", self.sent_texts[0][1])
+
 
 # -------------------------------------------------------------
 # Intent Validation & Help Text
@@ -530,6 +602,89 @@ class TestIntentAndHelp(unittest.TestCase):
             self.assertIn("plan", help_str, f"Missing 'plan' in {lang} help")
             self.assertIn("digest", help_str, f"Missing 'digest' in {lang} help")
             self.assertIn("calendar", help_str, f"Missing 'calendar' in {lang} help")
+
+
+# -------------------------------------------------------------
+# Roman Urdu Built-in Strings Tests
+# -------------------------------------------------------------
+class TestRomanUrduStrings(unittest.TestCase):
+    """
+    Verify hand-written built-in Roman Urdu ('ur-roman') strings:
+    1. Every new key (plan_*, digest_*, calendar_*, login_failed_password) exists in STRINGS['ur-roman'].
+    2. Every string contains Latin letters only, no Urdu/Arabic script.
+    3. Placeholders in ur-roman match the English placeholders exactly.
+    4. t() returns the built-in string directly without accessing translation cache or LLM provider.
+    """
+
+    def test_roman_urdu_built_in_strings_and_no_urdu_script(self):
+        new_keys = [
+            k for k in STRINGS["en"].keys()
+            if k.startswith(("plan_", "digest_", "calendar_")) or k == "login_failed_password"
+        ]
+        self.assertEqual(len(new_keys), 19, f"Expected 19 new keys, found {len(new_keys)}: {new_keys}")
+        self.assertIn("ur-roman", STRINGS, "STRINGS must contain 'ur-roman' dictionary")
+
+        ur_roman = STRINGS["ur-roman"]
+
+        for key in new_keys:
+            self.assertIn(key, ur_roman, f"Key '{key}' missing from STRINGS['ur-roman']")
+            val = ur_roman[key]
+            self.assertIsInstance(val, str)
+            self.assertTrue(len(val.strip()) > 0, f"Key '{key}' is empty in STRINGS['ur-roman']")
+
+            # Assert Latin letters only, no Urdu / Arabic unicode script
+            # Arabic & Urdu ranges: 0x0600 - 0x06FF, 0x0750 - 0x077F, 0xFB50 - 0xFDFF, 0xFE70 - 0xFEFF
+            urdu_chars = [
+                c for c in val
+                if (0x0600 <= ord(c) <= 0x06FF)
+                or (0x0750 <= ord(c) <= 0x077F)
+                or (0xFB50 <= ord(c) <= 0xFDFF)
+                or (0xFE70 <= ord(c) <= 0xFEFF)
+            ]
+            self.assertEqual(
+                urdu_chars, [],
+                f"Key '{key}' in ur-roman contains Urdu script characters: {urdu_chars}"
+            )
+
+            # Assert placeholders match English exactly
+            en_placeholders = sorted(re.findall(r"\{([a-zA-Z0-9_]+)\}", STRINGS["en"][key]))
+            roman_placeholders = sorted(re.findall(r"\{([a-zA-Z0-9_]+)\}", val))
+            self.assertEqual(
+                en_placeholders, roman_placeholders,
+                f"Placeholder mismatch for '{key}': en={en_placeholders}, ur-roman={roman_placeholders}"
+            )
+
+    def test_roman_urdu_strings_never_hit_cache_or_llm(self):
+        """Ensure calling t() for ur-roman new keys never calls _get_cached_translation or LLM."""
+        new_keys = [
+            k for k in STRINGS["en"].keys()
+            if k.startswith(("plan_", "digest_", "calendar_")) or k == "login_failed_password"
+        ]
+        dummy_kwargs = {
+            "target": 80,
+            "course": "AI",
+            "pres": 10,
+            "tot": 12,
+            "pct": 83,
+            "can_miss": 1,
+            "must_attend": 2,
+            "miss": 1,
+            "new_total": 13,
+            "time": "08:00",
+            "warn": 75,
+            "count": 3,
+        }
+        with patch("llm.i18n._get_cached_translation") as mock_cache, \
+             patch("llm.i18n._translate_with_llm") as mock_llm:
+            for key in new_keys:
+                res = t(key, lang="ur-roman", **dummy_kwargs)
+                self.assertTrue(bool(res), f"t('{key}', 'ur-roman') returned empty")
+                # Ensure no Urdu script in returned text
+                has_urdu = any(0x0600 <= ord(c) <= 0x06FF for c in res)
+                self.assertFalse(has_urdu, f"t('{key}', 'ur-roman') produced Urdu script: {res}")
+
+            mock_cache.assert_not_called()
+            mock_llm.assert_not_called()
 
 
 if __name__ == "__main__":
