@@ -245,7 +245,7 @@ Registered students can send WhatsApp voice notes instead of typing. The bot tra
 - **Languages supported**: Urdu, Sindhi, and English.
 - **Safety gates**: Voice notes are accepted only from registered, active, non-locked students. Voice notes sent during sign-up (`awaiting_email` or `awaiting_password`) are rejected with an explicit prompt to type credentials, and the audio is discarded immediately without calling any external service. Unknown numbers are silently ignored.
 - **Rate limits & thresholds**: Voice notes have a limit of 30 seconds (`VOICE_MAX_SECONDS=30`), ~2 MB raw audio (`VOICE_MAX_BYTES=2000000`), and 10 voice requests per hour per user (`VOICE_LIMIT_PER_HOUR=10`).
-- **STT providers**: Groq Whisper (`whisper-large-v3-turbo`) with automatic fallback to Gemini (`gemini-1.5-flash`). Configured via `STT_PROVIDERS=groq,gemini`.
+- **STT providers**: Groq Whisper (`whisper-large-v3-turbo`, `whisper-large-v3`) with automatic fallback to Gemini (`gemini-3.5-flash-lite`, `gemini-3.8-flash`, `gemini-3.6-flash`). Configured via `STT_PROVIDERS=groq,gemini`.
 
 ### What the bot will not do
 
@@ -342,8 +342,8 @@ To change the bot's WhatsApp number, stop the bridge, delete `whatsapp_bridge/.w
 | `LLM_HELP_REPLY_INTERVAL_MIN` | `2` | Minimum gap between "I didn't understand" replies |
 | `GREETING_REPLY` | `1` | Reply to greetings |
 | `STT_PROVIDERS` | `groq,gemini` | Ordered STT providers for voice transcription |
-| `GROQ_STT_MODELS` | `whisper-large-v3-turbo` | Whisper model(s) for Groq STT |
-| `GEMINI_STT_MODELS` | `gemini-1.5-flash` | Gemini model(s) for STT fallback |
+| `GROQ_STT_MODELS` | `whisper-large-v3-turbo,whisper-large-v3` | Whisper model(s) for Groq STT |
+| `GEMINI_STT_MODELS` | `gemini-3.5-flash-lite,gemini-3.8-flash,gemini-3.6-flash` | Gemini model(s) for STT fallback |
 | `VOICE_MAX_SECONDS` | `30` | Maximum voice note duration in seconds |
 | `VOICE_MAX_BYTES` | `2000000` | Maximum raw voice note audio bytes (~2 MB) |
 | `VOICE_LIMIT_PER_HOUR` | `10` | Maximum voice notes per user per hour |

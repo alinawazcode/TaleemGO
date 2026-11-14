@@ -35,11 +35,14 @@ import users as usr                                                     # noqa: 
 from wa_monitor import run_all_users                                    # noqa: E402
 
 try:
-    from app.llm.stt import transcribe as stt_transcribe
+    from app.llm import stt
+    stt_transcribe = stt.transcribe
 except ImportError:
     try:
-        from llm.stt import transcribe as stt_transcribe
+        import llm.stt as stt
+        stt_transcribe = stt.transcribe
     except ImportError:
+        stt = None
         stt_transcribe = None
 
 try:
@@ -1266,6 +1269,7 @@ def _handle_cmd_users(chat_id: str):
 
 def _handle_cmd_llm(chat_id: str):
     summary = registry.get_summary()
+    stt_summary = stt.get_summary() if (stt and hasattr(stt, "get_summary")) else {}
     locked_count = usr.count_locked_users()
     lines = ["TaleemGo AI LLM Status:"]
     for prov, data in summary.items():
@@ -1274,6 +1278,14 @@ def _handle_cmd_llm(chat_id: str):
         calls = data["calls_today"]
         last_err = data["last_error"]
         lines.append(f"- {prov}: {status} (model: {model}) | calls today: {calls} | last error: {last_err}")
+    if stt_summary:
+        lines.append("\nSTT Providers:")
+        for prov, data in stt_summary.items():
+            status = data["status"]
+            model = data.get("model", "")
+            calls = data.get("calls_today", 0)
+            last_err = data.get("last_error", "none")
+            lines.append(f"- {prov} (STT): {status} (model: {model}) | calls today: {calls} | last error: {last_err}")
     lines.append(f"\nLocked users: {locked_count} locked")
     _reply(chat_id, "\n".join(lines))
 
@@ -1287,6 +1299,13 @@ def _handle_cmd_llm_test(chat_id: str):
             lines.append(f"- {prov}: ok ({model_id}, {int(latency)}ms)")
         else:
             lines.append(f"- {prov}: {status} ({model_id})")
+    if stt and hasattr(stt, "run_live_check") and hasattr(stt, "get_configured_stt_providers"):
+        for prov in stt.get_configured_stt_providers():
+            status, model_id, latency = stt.run_live_check(prov)
+            if status == "ok":
+                lines.append(f"- {prov} (STT): ok ({model_id}, {int(latency)}ms)")
+            else:
+                lines.append(f"- {prov} (STT): {status} ({model_id})")
     _reply(chat_id, "\n".join(lines))
 
 

@@ -35,6 +35,9 @@ FAKE_SECONDS = 5.0
 FAKE_CHAT = "123456789@c.us"
 FAKE_TRANSCRIPT = "Show my attendance"
 
+VALID_GROQ_KEY = "gsk_live_abcdef1234567890abcdef1234567890"
+VALID_GEMINI_KEY = "AIzaSyLive_abcdef1234567890abcdef123456"
+
 
 def _make_audio_data(mime=FAKE_MIME, data_b64=FAKE_AUDIO_B64, seconds=FAKE_SECONDS):
     return {"mime": mime, "data_b64": data_b64, "seconds": seconds}
@@ -307,7 +310,7 @@ class TestSTTGroqOk(unittest.TestCase):
         fake_resp.status_code = 200
         fake_resp.json.return_value = {"text": "My attendance please"}
 
-        with patch.dict(os.environ, {"GROQ_API_KEY": "gsk_" + "x" * 40, "GROQ_STT_MODELS": "whisper-large-v3-turbo"}), \
+        with patch.dict(os.environ, {"GROQ_API_KEY": VALID_GROQ_KEY, "GROQ_STT_MODELS": "whisper-large-v3-turbo"}), \
              patch("llm.stt.requests.post", return_value=fake_resp):
             result = stt._transcribe_groq(b"\xff\xfb" * 50, "audio/ogg", 3.0, "en")
 
@@ -325,7 +328,7 @@ class TestSTTGroqRateLimit(unittest.TestCase):
         fake_resp.status_code = 429
         fake_resp.headers = {"retry-after": "60"}
 
-        with patch.dict(os.environ, {"GROQ_API_KEY": "gsk_" + "x" * 40, "GROQ_STT_MODELS": "whisper-large-v3-turbo"}), \
+        with patch.dict(os.environ, {"GROQ_API_KEY": VALID_GROQ_KEY, "GROQ_STT_MODELS": "whisper-large-v3-turbo"}), \
              patch("llm.stt.requests.post", return_value=fake_resp):
             result = stt._transcribe_groq(b"\xff\xfb" * 50, "audio/ogg", 3.0, "en")
 
@@ -343,7 +346,7 @@ class TestSTTGroqBadKey(unittest.TestCase):
         fake_resp = MagicMock()
         fake_resp.status_code = 401
 
-        with patch.dict(os.environ, {"GROQ_API_KEY": "gsk_" + "x" * 40, "GROQ_STT_MODELS": "whisper-large-v3-turbo"}), \
+        with patch.dict(os.environ, {"GROQ_API_KEY": VALID_GROQ_KEY, "GROQ_STT_MODELS": "whisper-large-v3-turbo"}), \
              patch("llm.stt.requests.post", return_value=fake_resp):
             result = stt._transcribe_groq(b"\xff\xfb" * 50, "audio/ogg", 3.0, "en")
 
@@ -354,7 +357,7 @@ class TestSTTGroqBadKey(unittest.TestCase):
 
 class TestSTTGeminiOk(unittest.TestCase):
     def test_gemini_transcribes(self):
-        """Gemini provider returns transcript."""
+        """Gemini provider returns transcript and sends key in x-goog-api-key header."""
         import llm.stt as stt
         with stt._stt_registry_lock:
             stt._stt_registry.clear()
@@ -365,11 +368,51 @@ class TestSTTGeminiOk(unittest.TestCase):
             "candidates": [{"content": {"parts": [{"text": "Hello world"}]}}]
         }
 
-        with patch.dict(os.environ, {"GEMINI_API_KEY": "AIza" + "x" * 36, "GEMINI_STT_MODELS": "gemini-1.5-flash"}), \
-             patch("llm.stt.requests.post", return_value=fake_resp):
+        test_key = VALID_GEMINI_KEY
+        with patch.dict(os.environ, {"GEMINI_API_KEY": test_key, "GEMINI_STT_MODELS": "gemini-3.5-flash-lite"}), \
+             patch("llm.stt.requests.post", return_value=fake_resp) as mock_post:
             result = stt._transcribe_gemini(b"\xff\xfb" * 50, "audio/ogg", 3.0, "en")
 
         self.assertEqual(result, "Hello world")
+        called_url = mock_post.call_args[0][0]
+        called_kwargs = mock_post.call_args[1]
+        self.assertNotIn("key=", called_url, "API key must not be passed in the URL")
+        self.assertEqual(called_kwargs["headers"].get("x-goog-api-key"), test_key)
+
+
+class TestSTTNoKeyInLogsOnConnectionError(unittest.TestCase):
+    def test_key_not_in_logs_on_connection_error(self):
+        """When connection error occurs, API key must never appear in logs."""
+        import logging
+        import requests
+        import llm.stt as stt
+
+        secret_key = "AIzaSySecretKeyNeverLogThis"
+        with stt._stt_registry_lock:
+            stt._stt_registry.clear()
+
+        log_records = []
+        class CapturingHandler(logging.Handler):
+            def emit(self, record):
+                log_records.append(record.getMessage())
+
+        handler = CapturingHandler()
+        stt_log = logging.getLogger("taleemgo.stt")
+        stt_log.addHandler(handler)
+        old_level = stt_log.level
+        stt_log.setLevel(logging.DEBUG)
+
+        try:
+            with patch.dict(os.environ, {"GEMINI_API_KEY": secret_key, "GEMINI_STT_MODELS": "gemini-3.5-flash-lite"}), \
+                 patch("llm.stt.requests.post", side_effect=requests.ConnectionError("Failed to connect to host")):
+                stt._transcribe_gemini(b"\xff\xfb" * 50, "audio/ogg", 3.0, "en")
+        finally:
+            stt_log.removeHandler(handler)
+            stt_log.setLevel(old_level)
+
+        self.assertTrue(len(log_records) > 0)
+        for msg in log_records:
+            self.assertNotIn(secret_key, msg, f"Secret key leaked in log message: {msg}")
 
 
 class TestSTTNoProviders(unittest.TestCase):
@@ -397,9 +440,9 @@ class TestSTTFailover(unittest.TestCase):
 
         with patch.dict(os.environ, {
             "STT_PROVIDERS": "groq,gemini",
-            "GROQ_API_KEY": "gsk_" + "x" * 40,
-            "GEMINI_API_KEY": "AIza" + "x" * 36,
-            "GEMINI_STT_MODELS": "gemini-1.5-flash",
+            "GROQ_API_KEY": VALID_GROQ_KEY,
+            "GEMINI_API_KEY": VALID_GEMINI_KEY,
+            "GEMINI_STT_MODELS": "gemini-3.5-flash-lite",
         }), patch("llm.stt.requests.post", return_value=fake_gemini_resp):
             result = stt.transcribe(FAKE_AUDIO_B64, FAKE_MIME, 3.0)
 
@@ -422,7 +465,7 @@ class TestSTTModelFailover404(unittest.TestCase):
         resp_200.json.return_value = {"text": "Model fallback success"}
 
         with patch.dict(os.environ, {
-            "GROQ_API_KEY": "gsk_" + "x" * 40,
+            "GROQ_API_KEY": VALID_GROQ_KEY,
             "GROQ_STT_MODELS": "dead-model,whisper-large-v3-turbo",
         }), patch("llm.stt.requests.post", side_effect=[resp_404, resp_200]):
             result = stt._transcribe_groq(b"\xff\xfb" * 50, "audio/ogg", 3.0, "en")
@@ -457,7 +500,7 @@ class TestSTTNoAudioInLogs(unittest.TestCase):
         stt_log.setLevel(logging.DEBUG)
 
         try:
-            with patch.dict(os.environ, {"GROQ_API_KEY": "gsk_" + "x" * 40, "GROQ_STT_MODELS": "whisper-large-v3-turbo"}), \
+            with patch.dict(os.environ, {"GROQ_API_KEY": VALID_GROQ_KEY, "GROQ_STT_MODELS": "whisper-large-v3-turbo"}), \
                  patch("llm.stt.requests.post", return_value=fake_resp):
                 stt._transcribe_groq(b"\xff\xfb" * 50, "audio/ogg", 3.0, "en")
         finally:
@@ -557,8 +600,11 @@ class TestNoLMSDataInSTT(unittest.TestCase):
             resp.json.return_value = {"text": "hello"}
             return resp
 
-        with patch.dict(os.environ, {"GROQ_API_KEY": "gsk_" + "x" * 40, "GROQ_STT_MODELS": "whisper-large-v3-turbo"}), \
-             patch("llm.stt.requests.post", side_effect=fake_post):
+        with patch.dict(os.environ, {
+            "STT_PROVIDERS": "groq",
+            "GROQ_API_KEY": VALID_GROQ_KEY,
+            "GROQ_STT_MODELS": "whisper-large-v3-turbo",
+        }), patch.object(stt.requests, "post", side_effect=fake_post):
             stt.transcribe(FAKE_AUDIO_B64, FAKE_MIME, 3.0, lang_hint="ur")
 
         self.assertEqual(len(captured_requests), 1)
@@ -646,6 +692,64 @@ class TestVoiceStrings(unittest.TestCase):
             match = arabic_re.search(val)
             self.assertIsNone(match,
                 f"ur-roman STRINGS['{key}'] contains Arabic/Urdu script: {val!r}")
+
+
+class TestAdminLLMStatusAndTestSTT(unittest.TestCase):
+    def test_llm_status_shows_stt_providers(self):
+        """Admin running 'llm' displays STT providers section."""
+        import wa_bot
+        import users as usr
+        import llm.stt as stt
+
+        with stt._stt_registry_lock:
+            stt._stt_registry.clear()
+
+        replies = []
+        with patch.object(wa_bot, "_reply", side_effect=lambda cid, txt: replies.append(txt)), \
+             patch.dict(os.environ, {
+                 "GROQ_API_KEY": VALID_GROQ_KEY,
+                 "GEMINI_API_KEY": VALID_GEMINI_KEY,
+                 "STT_PROVIDERS": "groq,gemini",
+             }):
+            wa_bot._handle_cmd_llm("admin@c.us")
+
+        self.assertEqual(len(replies), 1)
+        output = replies[0]
+        self.assertIn("STT Providers:", output)
+        self.assertIn("groq (STT):", output)
+        self.assertIn("gemini (STT):", output)
+
+    def test_llm_test_checks_stt_with_silent_wav(self):
+        """Admin running 'llm test' checks STT with 1-second silent WAV and outputs result lines."""
+        import wa_bot
+        import llm.stt as stt
+
+        with stt._stt_registry_lock:
+            stt._stt_registry.clear()
+
+        fake_resp = MagicMock()
+        fake_resp.status_code = 200
+        fake_resp.json.return_value = {"text": ""}
+
+        replies = []
+        with patch.object(wa_bot, "_reply", side_effect=lambda cid, txt: replies.append(txt)), \
+             patch.dict(os.environ, {
+                 "GROQ_API_KEY": VALID_GROQ_KEY,
+                 "GEMINI_API_KEY": VALID_GEMINI_KEY,
+                 "STT_PROVIDERS": "groq,gemini",
+                 "GROQ_STT_MODELS": "whisper-large-v3-turbo",
+                 "GEMINI_STT_MODELS": "gemini-3.5-flash-lite",
+             }), \
+             patch.object(stt.requests, "post", return_value=fake_resp):
+            wa_bot._handle_cmd_llm_test("admin@c.us")
+
+        self.assertEqual(len(replies), 1)
+        output = replies[0]
+        self.assertIn("TaleemGo AI LLM Test:", output)
+        self.assertIn("groq (STT): ok", output)
+        self.assertIn("gemini (STT): ok", output)
+        self.assertIn("whisper-large-v3-turbo", output)
+        self.assertIn("gemini-3.5-flash-lite", output)
 
 
 if __name__ == "__main__":
