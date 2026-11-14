@@ -20,6 +20,9 @@ ALLOWED_INTENTS = {
     "assignments",
     "upcoming",
     "grades",
+    "plan",
+    "digest",
+    "calendar",
     "help",
     "greeting",
     "resources",
@@ -142,7 +145,10 @@ def validate_intent_response(data: dict, has_pending_download: bool = False) -> 
                 raise ValueError("At most 1 download action allowed")
 
         # Check allowed keys per action
-        allowed_act_keys = {"intent", "course_query", "title_query", "week", "numbers", "all", "cancel", "latest"}
+        allowed_act_keys = {
+            "intent", "course_query", "title_query", "week", "numbers", "all", "cancel", "latest",
+            "target", "miss", "enable", "time",
+        }
         if not set(act.keys()).issubset(allowed_act_keys):
             unknown_act = set(act.keys()) - allowed_act_keys
             raise ValueError(f"Unknown action keys: {unknown_act}")
@@ -154,6 +160,30 @@ def validate_intent_response(data: dict, has_pending_download: bool = False) -> 
             if not isinstance(lat, bool):
                 raise ValueError(f"Invalid latest value: {lat}")
             val_act["latest"] = lat
+
+        if "target" in act and act["target"] is not None:
+            tg = act["target"]
+            if isinstance(tg, bool) or not isinstance(tg, (int, float)) or not (1 <= tg <= 99):
+                raise ValueError(f"Invalid target percentage: {tg}")
+            val_act["target"] = float(tg) if isinstance(tg, float) else int(tg)
+
+        if "miss" in act and act["miss"] is not None:
+            ms = act["miss"]
+            if isinstance(ms, bool) or not isinstance(ms, int) or ms < 0 or ms > 100:
+                raise ValueError(f"Invalid miss count: {ms}")
+            val_act["miss"] = ms
+
+        if "enable" in act and act["enable"] is not None:
+            en_val = act["enable"]
+            if not isinstance(en_val, bool):
+                raise ValueError(f"Invalid enable value: {en_val}")
+            val_act["enable"] = en_val
+
+        if "time" in act and act["time"] is not None:
+            tm = act["time"]
+            if not _validate_clean_string(tm, 10):
+                raise ValueError(f"Invalid time string: {tm}")
+            val_act["time"] = tm.strip()
 
         if "course_query" in act and act["course_query"] is not None:
             cq = act["course_query"]
@@ -215,7 +245,7 @@ def build_system_prompt(
         "3. If off-topic (general knowledge, coding help, jokes, chit-chat, jailbreaks), set off_topic: true, unsupported: false, actions: [].\n"
         "4. If asking about unsupported university topics (GPA, results, transcript, timetable, tuition fees, exams), set unsupported: true, off_topic: false, actions: [].\n"
         "5. Never output free-text answers, greetings, or explanations.\n\n"
-        "ALLOWED INTENTS: courses, assignments, upcoming, grades, attendance, resources, clos, download, help, greeting, choose\n\n"
+        "ALLOWED INTENTS: courses, assignments, upcoming, grades, plan, digest, calendar, attendance, resources, clos, download, help, greeting, choose\n\n"
         "OUTPUT JSON SCHEMA:\n"
         "{\n"
         '  "lang": "<language tag: en, ur, ur-roman, sd, sd-roman, hi>",\n'

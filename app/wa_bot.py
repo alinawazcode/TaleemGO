@@ -12,7 +12,9 @@ import re
 import sys
 import threading
 import time
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+from typing import Optional
 
 import requests
 from dotenv import load_dotenv
@@ -24,7 +26,9 @@ load_dotenv(os.path.join(os.path.dirname(__file__), "..", ".env"))
 
 from courses import _edit_distance_1, clean_course_query, course_acronym, format_course_list, resolve_course  # noqa: E402
 from lms_client import LMSClient, LMSAuthExpired, LMSError, summarize_grades  # noqa: E402
-from timeutils import to_local                                          # noqa: E402
+from timeutils import to_local, get_local_now, get_local_date_and_time  # noqa: E402
+from calendar_gen import generate_calendar_ics                          # noqa: E402
+from planner import calculate_attendance_plan, calculate_miss_what_if, get_default_target  # noqa: E402
 import wa_transport as wa                                               # noqa: E402
 import users as usr                                                     # noqa: E402
 from wa_monitor import run_all_users                                    # noqa: E402
@@ -116,11 +120,13 @@ def _start_monitor():
     sched = BackgroundScheduler()
     sched.add_job(run_all_users, "interval", minutes=minutes,
                   next_run_time=datetime.now() + timedelta(seconds=60))
+    sched.add_job(check_daily_digests, "interval", minutes=1,
+                  next_run_time=datetime.now() + timedelta(seconds=15))
     sched.add_job(usr.cleanup_stale_signups, "interval", minutes=2,
                   next_run_time=datetime.now() + timedelta(seconds=30))
     sched.start()
     api.state.sched = sched
-    log.info("Monitor scheduled every %d min; stale cleanup every 2 min", minutes)
+    log.info("Monitor scheduled every %d min; daily digest every 1 min; stale cleanup every 2 min", minutes)
 
     def _startup_llm_check():
         if not is_llm_enabled():
@@ -291,6 +297,427 @@ def _handle_attendance_cmd(chat_id: str, lms, arg: str):
         options = "\n".join(f"{i}. {c.get('code')} {c.get('name')}" for i, c in enumerate(matches, 1))
         usr.set_pending(chat_id, {"type": "course", "courses": matches, "command": "attendance", "extra": ""})
         _reply(chat_id, t("which_course", lang, options=options))
+
+
+def _show_course_plan(chat_id: str, lms, course: dict, target: Optional[float] = None, miss: Optional[int] = None, extra: str = "", lang: str = "en"):
+    if target is None:
+        target = get_default_target()
+    if extra:
+        if extra.startswith("miss="):
+            try:
+                miss = int(extra.split("=")[1])
+            except Exception:
+                pass
+        elif extra.startswith("target="):
+            try:
+                target = float(extra.split("=")[1])
+            except Exception:
+                pass
+        elif extra.isdigit():
+            val = int(extra)
+            if 1 <= val <= 99:
+                target = val
+
+    att = lms.get_attendance()
+    c_att = att.get("courses", {}).get(course["id"], {})
+    pres = c_att.get("present", 0)
+    tot = c_att.get("total", 0)
+    acr = course_acronym(course.get("name", ""))
+    c_label = f"{acr} ({course['code']})" if acr else course["code"]
+
+    if miss is not None:
+        if tot <= 0:
+            _reply(chat_id, t("plan_no_records", lang, course=c_label))
+            return
+        res = calculate_miss_what_if(pres, tot, miss)
+        pct_disp = f"{res['new_percent']:.1f}" if res['new_percent'] is not None else "0.0"
+        _reply(chat_id, t("plan_what_if", lang, course=c_label, miss=miss, pct=pct_disp, pres=pres, new_total=res['new_total']))
+        return
+
+    plan_res = calculate_attendance_plan(pres, tot, target)
+    tgt_disp = int(target) if target == int(target) else target
+    lines = [t("plan_heading", lang, target=tgt_disp)]
+    if plan_res["status"] == "no_records":
+        lines.append(t("plan_no_records", lang, course=c_label))
+    elif plan_res["status"] == "safe":
+        lines.append(t("plan_safe", lang, course=c_label, pres=pres, tot=tot, pct=f"{plan_res['percent']:.1f}", can_miss=plan_res["can_miss"], target=tgt_disp))
+    else:
+        lines.append(t("plan_need", lang, course=c_label, pres=pres, tot=tot, pct=f"{plan_res['percent']:.1f}", must_attend=plan_res["must_attend"], target=tgt_disp))
+    lines.append(t("plan_assumption", lang))
+    _reply(chat_id, "\n".join(lines))
+
+
+def _handle_plan_cmd(chat_id: str, lms, arg: str):
+    user = usr.get_user(chat_id)
+    lang = user.get("lang", "en") if user else "en"
+    def_target = get_default_target()
+
+    arg_clean = arg.strip() if arg else ""
+
+    # Check for miss N
+    miss_match = re.search(r"\bmiss\s*(\d+)\b", arg_clean, re.IGNORECASE)
+    miss_num = int(miss_match.group(1)) if miss_match else None
+    if miss_match:
+        course_part = re.sub(r"\bmiss\s*\d+\b", "", arg_clean, flags=re.IGNORECASE).strip()
+    else:
+        course_part = arg_clean
+
+    target = def_target
+    tgt_match = re.search(r"\b(\d{1,3})\s*%?\b", course_part)
+    if tgt_match and miss_num is None:
+        val = int(tgt_match.group(1))
+        is_standalone = re.search(r"(?:^|\s)" + tgt_match.group(1) + r"%?(?:$|\s)", course_part)
+        if is_standalone:
+            if not (1 <= val <= 99):
+                _reply(chat_id, t("plan_invalid_target", lang))
+                return
+            target = val
+            course_part = re.sub(r"(?:^|\s)" + tgt_match.group(1) + r"%?(?:$|\s)", " ", course_part).strip()
+
+    courses = lms.get_courses()
+
+    if not course_part and miss_num is None:
+        att = lms.get_attendance()
+        lines = [t("plan_heading", lang, target=target)]
+        for c in courses:
+            c_att = att.get("courses", {}).get(c["id"], {})
+            pres = c_att.get("present", 0)
+            tot = c_att.get("total", 0)
+            acr = course_acronym(c.get("name", ""))
+            c_label = f"{acr} ({c['code']})" if acr else c["code"]
+            res = calculate_attendance_plan(pres, tot, target)
+            if res["status"] == "no_records":
+                lines.append(t("plan_no_records", lang, course=c_label))
+            elif res["status"] == "safe":
+                lines.append(t("plan_safe", lang, course=c_label, pres=pres, tot=tot, pct=f"{res['percent']:.1f}", can_miss=res["can_miss"], target=target))
+            else:
+                lines.append(t("plan_need", lang, course=c_label, pres=pres, tot=tot, pct=f"{res['percent']:.1f}", must_attend=res["must_attend"], target=target))
+        lines.append(t("plan_assumption", lang))
+        _reply(chat_id, "\n".join(lines))
+        return
+
+    matches = resolve_course(lms, course_part) if course_part else courses
+    if not matches:
+        usr.set_pending_action(chat_id, {"intent": "plan", "target": target, "miss": miss_num})
+        _reply(chat_id, t("course_not_found", lang, courses=format_course_list(courses)))
+        return
+    elif len(matches) == 1:
+        _show_course_plan(chat_id, lms, matches[0], target=target, miss=miss_num, lang=lang)
+    else:
+        options = "\n".join(f"{i}. {c.get('code')} {c.get('name')}" for i, c in enumerate(matches, 1))
+        extra_str = f"miss={miss_num}" if miss_num is not None else f"target={target}"
+        usr.set_pending(chat_id, {"type": "course", "courses": matches, "command": "plan", "extra": extra_str})
+        _reply(chat_id, t("which_course", lang, options=options))
+
+
+def _handle_plan_action(chat_id: str, lms, act: dict, lang: str):
+    cq = act.get("course_query", "")
+    target = act.get("target") or get_default_target()
+    miss_num = act.get("miss")
+
+    courses = lms.get_courses()
+    if not cq:
+        if miss_num is None:
+            att = lms.get_attendance()
+            lines = [t("plan_heading", lang, target=target)]
+            for c in courses:
+                c_att = att.get("courses", {}).get(c["id"], {})
+                pres = c_att.get("present", 0)
+                tot = c_att.get("total", 0)
+                acr = course_acronym(c.get("name", ""))
+                c_label = f"{acr} ({c['code']})" if acr else c["code"]
+                res = calculate_attendance_plan(pres, tot, target)
+                if res["status"] == "no_records":
+                    lines.append(t("plan_no_records", lang, course=c_label))
+                elif res["status"] == "safe":
+                    lines.append(t("plan_safe", lang, course=c_label, pres=pres, tot=tot, pct=f"{res['percent']:.1f}", can_miss=res["can_miss"], target=target))
+                else:
+                    lines.append(t("plan_need", lang, course=c_label, pres=pres, tot=tot, pct=f"{res['percent']:.1f}", must_attend=res["must_attend"], target=target))
+            lines.append(t("plan_assumption", lang))
+            _reply(chat_id, "\n".join(lines))
+            return
+        else:
+            usr.set_pending_action(chat_id, {"intent": "plan", "target": target, "miss": miss_num})
+            _reply(chat_id, t("course_not_found", lang, courses=format_course_list(courses)))
+            return
+
+    matches = resolve_course(lms, cq)
+    if not matches:
+        usr.set_pending_action(chat_id, {"intent": "plan", "target": target, "miss": miss_num})
+        _reply(chat_id, t("course_not_found", lang, courses=format_course_list(courses)))
+        return
+    elif len(matches) == 1:
+        _show_course_plan(chat_id, lms, matches[0], target=target, miss=miss_num, lang=lang)
+    else:
+        options = "\n".join(f"{i}. {c.get('code')} {c.get('name')}" for i, c in enumerate(matches, 1))
+        extra_str = f"miss={miss_num}" if miss_num is not None else f"target={target}"
+        usr.set_pending(chat_id, {"type": "course", "courses": matches, "command": "plan", "extra": extra_str})
+        _reply(chat_id, t("which_course", lang, options=options))
+
+
+def _build_daily_digest_text(chat_id: str, lms, user: dict, now_dt: Optional[datetime] = None) -> str:
+    lang = user.get("lang", "en") if user else "en"
+    local_now = get_local_now(now_dt)
+    warn = int(os.environ.get("ATTENDANCE_WARN", "75"))
+
+    courses = {c["id"]: c for c in lms.get_courses()}
+
+    # 1. Assignments
+    asgns = lms.get_assignments()
+    subs = lms.get_submissions()
+    due_today = []
+    due_tomorrow = []
+    due_next_3 = []
+    overdue_count = 0
+
+    today_date = local_now.date()
+    tomorrow_date = today_date + timedelta(days=1)
+    day3_date = today_date + timedelta(days=3)
+
+    for a in asgns:
+        sub = subs.get(a["id"])
+        if sub and (sub.get("submitted_at") or sub.get("file_name")):
+            continue
+        due_raw = a.get("due_date")
+        if not due_raw:
+            continue
+        try:
+            due_dt = datetime.fromisoformat(due_raw.replace("Z", "+00:00")).astimezone(local_now.tzinfo)
+        except Exception:
+            continue
+
+        c = courses.get(a.get("course_id"))
+        acr = course_acronym(c.get("name", "")) if c else ""
+        c_code = acr or (c["code"] if c else "")
+        item_str = f"• {c_code}: {a['title']} (Due {to_local(due_raw)})"
+
+        if due_dt < local_now:
+            overdue_count += 1
+        elif due_dt.date() == today_date:
+            due_today.append(item_str)
+        elif due_dt.date() == tomorrow_date:
+            due_tomorrow.append(item_str)
+        elif due_dt.date() <= day3_date:
+            due_next_3.append(item_str)
+
+    asgn_lines = []
+    if due_today:
+        asgn_lines.append("📅 Due Today:\n" + "\n".join(due_today))
+    if due_tomorrow:
+        asgn_lines.append("⏳ Due Tomorrow:\n" + "\n".join(due_tomorrow))
+    if due_next_3:
+        asgn_lines.append("📌 Due in 2-3 Days:\n" + "\n".join(due_next_3))
+
+    if not asgn_lines:
+        if overdue_count > 0:
+            asgn_lines.append(f"{t('digest_nothing_due', lang)} ({overdue_count} overdue)")
+        else:
+            asgn_lines.append(t("digest_nothing_due", lang))
+    elif overdue_count > 0:
+        asgn_lines.append(f"⚠️ {overdue_count} overdue assignment(s)")
+
+    # 2. Attendance warnings
+    att = lms.get_attendance()
+    att_warnings = []
+    for cid, c_data in att.get("courses", {}).items():
+        pct = c_data.get("percent")
+        if pct is not None and pct < warn:
+            c = courses.get(cid)
+            acr = course_acronym(c.get("name", "")) if c else ""
+            c_label = f"{acr} ({c['code']})" if acr else (c["code"] if c else "Course")
+            att_warnings.append(f"• {c_label}: {pct}% (threshold: {warn}%)")
+
+    att_lines = []
+    if att_warnings:
+        att_lines.append(f"⚠️ Attendance Warning (< {warn}%):\n" + "\n".join(att_warnings))
+    else:
+        att_lines.append(t("digest_att_ok", lang, warn=warn))
+
+    # 3. New lectures and grades from last 24h
+    now_utc = local_now.astimezone(timezone.utc)
+    new_updates = []
+
+    # Monitor state reuse
+    udir = usr.user_dir(chat_id)
+    try:
+        from state import load_state
+        mon_state = load_state(udir)
+    except Exception:
+        mon_state = {}
+    seen_res = set(mon_state.get("resources", []))
+    seen_grades = dict(mon_state.get("grades", {}))
+
+    try:
+        resources = lms.get_resources()
+        for r in resources:
+            cat = r.get("created_at")
+            is_recent = False
+            if cat:
+                try:
+                    rdt = datetime.fromisoformat(cat.replace("Z", "+00:00"))
+                    if 0 <= (now_utc - rdt).total_seconds() <= 86400:
+                        is_recent = True
+                except Exception:
+                    pass
+            elif r["id"] not in seen_res:
+                is_recent = True
+
+            if is_recent:
+                c = courses.get(r.get("course_id"))
+                acr = course_acronym(c.get("name", "")) if c else ""
+                c_code = acr or (c["code"] if c else "")
+                new_updates.append(f"• Lecture: {c_code} - {r.get('title')}")
+    except Exception:
+        pass
+
+    try:
+        grades = lms.get_grades()
+        for g in grades:
+            gat = g.get("graded_at")
+            is_recent_grade = False
+            if gat:
+                try:
+                    gdt = datetime.fromisoformat(gat.replace("Z", "+00:00"))
+                    if 0 <= (now_utc - gdt).total_seconds() <= 86400:
+                        is_recent_grade = True
+                except Exception:
+                    pass
+            elif str(g.get("id")) not in seen_grades and g.get("grade") is not None:
+                is_recent_grade = True
+
+            if is_recent_grade and g.get("grade") is not None:
+                c = courses.get(g.get("course_id"))
+                acr = course_acronym(c.get("name", "")) if c else ""
+                c_code = acr or (c["code"] if c else "")
+                new_updates.append(f"• Grade: {c_code} - {g.get('title')}: {g.get('grade')}/{g.get('max_marks')}")
+    except Exception:
+        pass
+
+    updates_lines = []
+    if new_updates:
+        updates_lines.append("🔔 New in the last 24 hours:\n" + "\n".join(new_updates))
+    else:
+        updates_lines.append(t("digest_no_updates", lang))
+
+    sections = [
+        t("digest_header", lang),
+        "\n".join(asgn_lines),
+        "\n".join(att_lines),
+        "\n".join(updates_lines),
+    ]
+    return "\n\n".join(s for s in sections if s)
+
+
+def _send_daily_digest(chat_id: str, lms, user: dict, is_manual: bool = False, now_dt: Optional[datetime] = None):
+    text = _build_daily_digest_text(chat_id, lms, user, now_dt=now_dt)
+    wa.send_text(chat_id, text)
+
+
+def _handle_digest_cmd(chat_id: str, lms, arg: str):
+    user = usr.get_user(chat_id)
+    lang = user.get("lang", "en") if user else "en"
+    tokens = arg.strip().split() if arg else []
+
+    if not tokens:
+        is_on = bool(user.get("digest_enabled", 0))
+        d_time = user.get("digest_time") or os.environ.get("DIGEST_DEFAULT_TIME", "07:30")
+        status_msg = t("digest_status_on", lang, time=d_time) if is_on else t("digest_status_off", lang)
+        _reply(chat_id, status_msg)
+        _send_daily_digest(chat_id, lms, user, is_manual=True)
+        return
+
+    sub = tokens[0].lower()
+    if sub == "on":
+        time_arg = tokens[1] if len(tokens) > 1 else os.environ.get("DIGEST_DEFAULT_TIME", "07:30")
+        if not re.match(r"^([01]\d|2[0-3]):[0-5]\d$", time_arg):
+            _reply(chat_id, t("digest_invalid_time", lang))
+            return
+        usr.set_digest(chat_id, enabled=True, time_str=time_arg)
+        _reply(chat_id, t("digest_enabled", lang, time=time_arg))
+    elif sub == "off":
+        usr.set_digest(chat_id, enabled=False)
+        _reply(chat_id, t("digest_disabled", lang))
+    else:
+        _reply(chat_id, t("digest_status_off", lang))
+
+
+def _handle_digest_action(chat_id: str, lms, act: dict, lang: str):
+    user = usr.get_user(chat_id)
+    enable = act.get("enable")
+    time_str = act.get("time")
+
+    if enable is True:
+        if time_str:
+            if not re.match(r"^([01]\d|2[0-3]):[0-5]\d$", time_str):
+                _reply(chat_id, t("digest_invalid_time", lang))
+                return
+        else:
+            time_str = user.get("digest_time") or os.environ.get("DIGEST_DEFAULT_TIME", "07:30")
+        usr.set_digest(chat_id, enabled=True, time_str=time_str)
+        _reply(chat_id, t("digest_enabled", lang, time=time_str))
+    elif enable is False:
+        usr.set_digest(chat_id, enabled=False)
+        _reply(chat_id, t("digest_disabled", lang))
+    else:
+        _handle_digest_cmd(chat_id, lms, "")
+
+
+def check_daily_digests(now_dt: Optional[datetime] = None):
+    local_date, local_time = get_local_date_and_time(now_dt)
+    due_users = usr.all_due_digest_users(local_date, local_time)
+    for u in due_users:
+        chat_id = u["chat_id"]
+        if u.get("status") != "active":
+            continue
+        try:
+            lms = usr.get_client(chat_id)
+            if lms is None:
+                tf = usr.token_file(chat_id)
+                if not os.path.exists(tf):
+                    continue
+                lms = LMSClient(token_file=tf)
+                usr.set_client(chat_id, lms)
+            _send_daily_digest(chat_id, lms, u, is_manual=False, now_dt=now_dt)
+            usr.record_digest_sent(chat_id, local_date)
+        except LMSAuthExpired:
+            log.warning("Session expired for %s… during digest; skipping", chat_id[-6:])
+            usr.record_digest_sent(chat_id, local_date)
+        except Exception:
+            log.exception("Daily digest failed for %s…", chat_id[-6:])
+
+
+def _handle_calendar_cmd(chat_id: str, lms, arg: str = ""):
+    user = usr.get_user(chat_id)
+    lang = user.get("lang", "en") if user else "en"
+    asgns = lms.get_assignments()
+    subs = lms.get_submissions()
+
+    pending = []
+    for a in asgns:
+        aid = a.get("id")
+        sub = subs.get(aid)
+        if sub and (sub.get("submitted_at") or sub.get("file_name")):
+            continue
+        if a.get("due_date"):
+            pending.append(a)
+
+    courses = {c["id"]: c for c in lms.get_courses()}
+    ics_str = generate_calendar_ics(pending, courses)
+    if not ics_str:
+        _reply(chat_id, t("calendar_no_deadlines", lang))
+        return
+
+    tmp_path = Path(usr.user_downloads_dir(chat_id)) / "deadlines.ics"
+    try:
+        tmp_path.write_text(ics_str, encoding="utf-8")
+        caption = t("calendar_caption", lang, count=len(pending))
+        wa.send_file(chat_id, str(tmp_path), caption=caption)
+    finally:
+        tmp_path.unlink(missing_ok=True)
+
+
+def _handle_calendar_action(chat_id: str, lms, act: dict, lang: str):
+    _handle_calendar_cmd(chat_id, lms, "")
 
 
 def _show_course_resources(chat_id: str, lms, course: dict):
@@ -725,6 +1152,8 @@ def _execute_course_command(chat_id: str, lms, cmd: str, course: dict, extra: st
         _handle_download_for_course(chat_id, lms, course, extra, is_latest=is_latest, lang=lang)
     elif cmd == "grades":
         _show_course_grades(chat_id, lms, course)
+    elif cmd == "plan":
+        _show_course_plan(chat_id, lms, course, extra=extra, lang=lang)
 
 
 def _handle_pending(chat_id: str, lms, pending: dict, text: str) -> bool:
@@ -1032,6 +1461,12 @@ def _dispatch_exact_cmd(chat_id: str, lms, word: str, arg: str):
         _reply(chat_id, cmd_assignments(lms, arg))
     elif word == "upcoming":
         _reply(chat_id, cmd_upcoming(lms, arg))
+    elif word == "plan":
+        _handle_plan_cmd(chat_id, lms, arg)
+    elif word == "digest":
+        _handle_digest_cmd(chat_id, lms, arg)
+    elif word == "calendar":
+        _handle_calendar_cmd(chat_id, lms, arg)
 
 
 def _handle_choose_action(chat_id: str, lms, act: dict, lang: str):
@@ -1131,6 +1566,12 @@ def _execute_action(chat_id: str, lms, act: dict, lang: str):
         _handle_download_action(chat_id, lms, act, lang)
     elif intent == "choose":
         _handle_choose_action(chat_id, lms, act, lang)
+    elif intent == "plan":
+        _handle_plan_action(chat_id, lms, act, lang)
+    elif intent == "digest":
+        _handle_digest_action(chat_id, lms, act, lang)
+    elif intent == "calendar":
+        _handle_calendar_action(chat_id, lms, act, lang)
 
 
 def _handle_natural_language(chat_id: str, text: str, user: dict, lms):
@@ -1314,7 +1755,10 @@ def _handle_active(chat_id: str, text: str, user: dict):
     word = word.lower().lstrip("/")
     arg = arg.strip()
 
-    exact_cmds = {"download", "dl", "attendance", "resources", "clos", "courses", "assignments", "upcoming", "grades", "grade"}
+    exact_cmds = {
+        "download", "dl", "attendance", "resources", "clos", "courses",
+        "assignments", "upcoming", "grades", "grade", "plan", "digest", "calendar",
+    }
     if word in exact_cmds:
         usr.clear_pending_action(chat_id)
         try:
@@ -1352,14 +1796,21 @@ def _handle_active(chat_id: str, text: str, user: dict):
                     _show_course_clos(chat_id, lms, course)
                 elif intent == "grades":
                     _show_course_grades(chat_id, lms, course)
+                elif intent == "plan":
+                    target = pending_act.get("target")
+                    miss = pending_act.get("miss")
+                    _show_course_plan(chat_id, lms, course, target=target, miss=miss, lang=lang)
                 return
             else:
                 options = "\n".join(f"{i}. {c.get('code')} {c.get('name')}" for i, c in enumerate(matches, 1))
+                extra_str = f"week {pending_act.get('week')}" if pending_act.get("week") is not None else pending_act.get("title_query", "")
+                if intent == "plan":
+                    extra_str = f"miss={pending_act.get('miss')}" if pending_act.get("miss") is not None else f"target={pending_act.get('target', 75)}"
                 usr.set_pending(chat_id, {
                     "type": "course",
                     "courses": matches,
                     "command": intent,
-                    "extra": f"week {pending_act.get('week')}" if pending_act.get("week") is not None else pending_act.get("title_query", ""),
+                    "extra": extra_str,
                     "is_latest": bool(pending_act.get("latest", False)),
                 })
                 _reply(chat_id, t("which_course", lang, options=options))
@@ -1379,7 +1830,7 @@ def _handle_active(chat_id: str, text: str, user: dict):
         has_explicit_intent = rule_check and (
             rule_check.get("unsupported")
             or rule_check.get("off_topic")
-            or any(a.get("intent") in ("attendance", "download", "resources", "clos", "grades", "assignments", "upcoming", "help", "greeting")
+            or any(a.get("intent") in ("attendance", "download", "resources", "clos", "grades", "assignments", "upcoming", "help", "greeting", "plan", "digest", "calendar")
                    for a in rule_check.get("actions", []))
         )
         if not has_explicit_intent:

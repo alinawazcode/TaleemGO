@@ -184,6 +184,9 @@ Typed commands always work, with or without the AI.
 | `assignments` | All assignments with status: submitted, pending, overdue |
 | `upcoming` | Pending assignments with deadlines |
 | `grades [course]` | Assignment marks as `8/10`, a running total, and teacher feedback |
+| `plan [course] [target]` | Attendance planner: how many classes you can miss or must attend for target% (default 75%), or `plan <course> miss N` |
+| `digest [on [HH:MM] \| off]` | Opt-in daily digest of deadlines, low attendance alerts, new lectures and grades |
+| `calendar` | Downloads an `.ics` file with upcoming assignment deadlines and 1-day alarms for Google/Apple Calendar |
 | `attendance [course]` | Overall attendance, or one course. Courses under `ATTENDANCE_WARN` (default 75%) get a warning mark |
 | `resources <course>` | Lecture files grouped by week |
 | `clos <course>` | Course learning outcomes |
@@ -203,8 +206,11 @@ Students can skip the syntax. The same intent, in different languages:
 | Language | Message | Result |
 |---|---|---|
 | English | `show my grade in NLP` | NLP grades |
+| English | `can I miss 3 classes in HCI` | Attendance what-if calculation |
+| English | `send my deadlines to Google Calendar` | Sends `.ics` calendar file |
 | Roman Urdu | `HCI ke pehle hafte ki slides bhej do` | HCI week 1 files |
 | Roman Urdu | `mera NLP ka attendance kitna hai` | NLP attendance |
+| Roman Urdu | `AI me kitni classes miss kar sakta hoon` | Attendance plan for AI |
 | Urdu | `میرا NLP کا اٹینڈنس کتنا ہے؟` | NLP attendance |
 | Sindhi | `منهنجي NLP جي حاضري ڪيتري آهي؟` | NLP attendance |
 | Sindhi | `ڪو اسائنمينٽ ڏيڻو آهي؟` | Upcoming assignments |
@@ -304,6 +310,8 @@ To change the bot's WhatsApp number, stop the bridge, delete `whatsapp_bridge/.w
 | `MAX_USERS` | `5` | Maximum registered numbers, admin included |
 | `ACTIVATION_PHRASES` | `taleemgo ai,taleem go ai,taleemgo` | Phrases that wake the bot for a new number |
 | `ATTENDANCE_WARN` | `75` | Attendance percentage that gets a warning mark |
+| `DIGEST_DEFAULT_TIME` | `07:30` | Default local time for the daily digest |
+| `TIMEZONE` | `Asia/Karachi` | Local timezone used for digest dispatch and timestamp formatting |
 | `TALEEMGO_SECRET_KEY` | generated | Encryption key. Created on first run if missing. Back it up. |
 | `ADMIN_NUMBER` | empty | Your number, digits only. Enables self-chat and admin commands |
 | `ADMIN_LID` | empty | Your WhatsApp `@lid` id, only if self-chat does not reply |
