@@ -258,6 +258,54 @@ def match_rules(text: str, has_pending_download: bool = False, stored_lang: str 
 
     is_latest = has_latest_keyword()
 
+    def has_plan_keyword():
+        plan_kws = KEYWORDS.get("plan", [])
+        latin_kws = [k for k in plan_kws if re.match(r"^[a-zA-Z\s]+$", k)]
+        arabic_kws = [k for k in plan_kws if not re.match(r"^[a-zA-Z\s]+$", k)]
+
+        for kw in latin_kws:
+            if re.search(r"\b" + re.escape(kw.lower()) + r"\b", norm_lower):
+                return True
+
+        for ak in arabic_kws:
+            folded_ak = fold_arabic_script(ak).lower()
+            if folded_ak in folded_lower or ak.lower() in norm_lower:
+                return True
+
+        return False
+
+    def has_digest_keyword():
+        digest_kws = KEYWORDS.get("digest", [])
+        latin_kws = [k for k in digest_kws if re.match(r"^[a-zA-Z\s]+$", k)]
+        arabic_kws = [k for k in digest_kws if not re.match(r"^[a-zA-Z\s]+$", k)]
+
+        for kw in latin_kws:
+            if re.search(r"\b" + re.escape(kw.lower()) + r"\b", norm_lower):
+                return True
+
+        for ak in arabic_kws:
+            folded_ak = fold_arabic_script(ak).lower()
+            if folded_ak in folded_lower or ak.lower() in norm_lower:
+                return True
+
+        return False
+
+    def has_calendar_keyword():
+        cal_kws = KEYWORDS.get("calendar", [])
+        latin_kws = [k for k in cal_kws if re.match(r"^[a-zA-Z\s]+$", k)]
+        arabic_kws = [k for k in cal_kws if not re.match(r"^[a-zA-Z\s]+$", k)]
+
+        for kw in latin_kws:
+            if re.search(r"\b" + re.escape(kw.lower()) + r"\b", norm_lower):
+                return True
+
+        for ak in arabic_kws:
+            folded_ak = fold_arabic_script(ak).lower()
+            if folded_ak in folded_lower or ak.lower() in norm_lower:
+                return True
+
+        return False
+
     # Grades keywords check:
     # - Latin-script keywords match as WHOLE WORDS only (regex \b)
     # - Arabic-script keywords keep working as they do now (folded substring)
@@ -291,7 +339,51 @@ def match_rules(text: str, has_pending_download: bool = False, stored_lang: str 
         or any(w in folded_lower for w in ("منهنجا", "میرے", "میرا", "کورس", "ڪورس", "مضمون"))
     )
 
-    if has_attendance:
+    plan_miss_num = None
+    plan_tgt_num = None
+    if has_plan_keyword():
+        m_miss = (
+            re.search(r"\b(?:miss|bunk|chhutti)\s*(\d+)\b", norm_lower)
+            or re.search(r"\b(\d+)\s*(?:miss|bunk|classes\s*miss|chhutti)\b", norm_lower)
+            or re.search(r"(\d+)\s*(?:چھٹی|ڪلاسون)", folded_lower)
+        )
+        if m_miss:
+            try:
+                plan_miss_num = int(m_miss.group(1))
+            except Exception:
+                pass
+        m_tgt = (
+            re.search(r"\b(?:target|hadd)\s*(\d+)\b", norm_lower)
+            or re.search(r"\b(\d+)\s*%", norm_lower)
+        )
+        if m_tgt:
+            try:
+                plan_tgt_num = int(m_tgt.group(1))
+            except Exception:
+                pass
+
+    digest_enable = None
+    digest_time_str = None
+    if has_digest_keyword():
+        m_on = bool(re.search(r"\b(?:on|enable|start)\b", norm_lower) or "آن" in folded_lower or "آن" in norm_lower)
+        m_off = bool(re.search(r"\b(?:off|disable|stop)\b", norm_lower) or any(w in folded_lower for w in ("آف", "بند")))
+        if m_on and not m_off:
+            digest_enable = True
+        elif m_off:
+            digest_enable = False
+        m_tm = re.search(r"\b([01]?\d|2[0-3]):([0-5]\d)\b", norm_lower)
+        if m_tm:
+            digest_time_str = m_tm.group(0)
+            if len(digest_time_str.split(":")[0]) == 1:
+                digest_time_str = "0" + digest_time_str
+
+    if has_plan_keyword():
+        matched_intent = "plan"
+    elif has_digest_keyword():
+        matched_intent = "digest"
+    elif has_calendar_keyword():
+        matched_intent = "calendar"
+    elif has_attendance:
         matched_intent = "attendance"
     elif has_grades_keyword() or (has_number_kw and has_mere_or_course):
         matched_intent = "grades"
@@ -316,7 +408,7 @@ def match_rules(text: str, has_pending_download: bool = False, stored_lang: str 
 
     # 4. Extract course_query candidates
     course_query = None
-    if matched_intent in ("attendance", "download", "resources", "clos", "grades", "courses"):
+    if matched_intent in ("attendance", "download", "resources", "clos", "grades", "courses", "plan"):
         # Remove matched keywords, week digits, ordinals, and stop words
         tokens = re.findall(r"[A-Za-z0-9\u0600-\u06FF]+", clean_text)
         candidates = []
@@ -331,7 +423,11 @@ def match_rules(text: str, has_pending_download: bool = False, stored_lang: str 
         for t in tokens:
             tl = t.lower()
             folded_t = fold_arabic_script(t).lower()
-            if tl.isdigit() and week_num is not None and int(tl) == week_num:
+            if tl.isdigit() and (
+                (week_num is not None and int(tl) == week_num)
+                or (plan_miss_num is not None and int(tl) == plan_miss_num)
+                or (plan_tgt_num is not None and int(tl) == plan_tgt_num)
+            ):
                 continue
             if tl in STOP_WORDS or folded_t in STOP_WORDS or tl in week_words or folded_t in week_words:
                 continue
@@ -358,6 +454,16 @@ def match_rules(text: str, has_pending_download: bool = False, stored_lang: str 
         action["latest"] = True
     if matched_intent == "download" and week_num is not None:
         action["week"] = week_num
+    if matched_intent == "plan":
+        if plan_tgt_num is not None and 1 <= plan_tgt_num <= 99:
+            action["target"] = plan_tgt_num
+        if plan_miss_num is not None:
+            action["miss"] = plan_miss_num
+    elif matched_intent == "digest":
+        if digest_enable is not None:
+            action["enable"] = digest_enable
+        if digest_time_str is not None:
+            action["time"] = digest_time_str
 
     return {
         "lang": lang,

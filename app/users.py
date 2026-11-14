@@ -19,6 +19,7 @@ import os
 import sqlite3
 import threading
 import time
+from typing import Optional
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
@@ -71,6 +72,13 @@ def init_db():
             c.execute("ALTER TABLE users ADD COLUMN lang TEXT NOT NULL DEFAULT 'en'")
         if "llm_locked_until" not in cols:
             c.execute("ALTER TABLE users ADD COLUMN llm_locked_until TEXT")
+        if "digest_enabled" not in cols:
+            c.execute("ALTER TABLE users ADD COLUMN digest_enabled INTEGER NOT NULL DEFAULT 0")
+        if "digest_time" not in cols:
+            def_time = os.environ.get("DIGEST_DEFAULT_TIME", "07:30")
+            c.execute(f"ALTER TABLE users ADD COLUMN digest_time TEXT NOT NULL DEFAULT '{def_time}'")
+        if "digest_last_date" not in cols:
+            c.execute("ALTER TABLE users ADD COLUMN digest_last_date TEXT")
 
         c.execute("""
             CREATE TABLE IF NOT EXISTS i18n_cache (
@@ -236,6 +244,33 @@ def all_active_users():
     with _db_lock, _conn() as c:
         rows = c.execute("SELECT * FROM users WHERE status='active'").fetchall()
     return [dict(r) for r in rows]
+
+
+def all_due_digest_users(current_date: str, current_time: str) -> list[dict]:
+    """Return active users who have digest enabled, not yet received today, and scheduled time <= current_time."""
+    with _db_lock, _conn() as c:
+        rows = c.execute(
+            """
+            SELECT * FROM users
+            WHERE status='active'
+              AND digest_enabled=1
+              AND (digest_last_date IS NULL OR digest_last_date != ?)
+              AND digest_time <= ?
+            """,
+            (current_date, current_time),
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def set_digest(chat_id: str, enabled: bool, time_str: Optional[str] = None):
+    kwargs = {"digest_enabled": 1 if enabled else 0}
+    if time_str is not None:
+        kwargs["digest_time"] = time_str
+    upsert_user(chat_id, **kwargs)
+
+
+def record_digest_sent(chat_id: str, date_str: str):
+    upsert_user(chat_id, digest_last_date=date_str)
 
 
 def get_users_summary() -> list[dict]:

@@ -231,6 +231,16 @@ KEYWORDS = {
     "grades": [
         "grade", "grades", "marks", "nambar", "گریڈ", "گريڊ", "مارکس", "مارڪس",
     ],
+    "plan": [
+        "plan", "bunk", "miss", "can i miss", "kitni classes", "chhutti", "safe", "چھٹی",
+        "ڪيتريون ڪلاسون", "ڇڏي سگهان", "حاضری پلان", "حاضري پلان",
+    ],
+    "digest": [
+        "digest", "daily digest", "daily update", "صبح کا خلاصہ", "روزانو خلاصو", "خلاصہ", "خلاصو",
+    ],
+    "calendar": [
+        "calendar", "ics", "google calendar", "کیلنڈر", "ڪئلينڊر", "schedule export",
+    ],
     "latest": [
         "latest", "newest", "recent", "last", "new",
         "naya", "nayi", "naye", "akhri", "aakhri",
@@ -260,6 +270,8 @@ COURSE_FILLER_WORDS_LATIN = [
     # Intent keywords (stripped from course_query)
     "attendance", "hazri", "haziri", "hazree", "haziree",
     "grade", "grades", "marks", "nambar", "number",
+    "plan", "bunk", "miss", "chhutti", "safe",
+    "digest", "calendar", "schedule",
     "assignment", "assignments", "homework", "deadline", "deadlines", "due", "kam", "kaam",
     "upcoming", "pending", "baqi", "baki",
     "clo", "clos", "outcome", "outcomes",
@@ -282,6 +294,7 @@ COURSE_FILLER_WORDS_ARABIC = [
     "ڈاؤنلوڈ", "ڊائونلوڊ",
     # Intent keywords
     "حاضري", "حاضری", "گريڊ", "گریڈ", "مارڪس", "مارکس", "نمبر", "سي ايل او", "سی ایل او",
+    "پلان", "چھٹی", "خلاصہ", "خلاصو", "کیلنڈر", "ڪئلينڊر",
     "اسائنمينٽ", "اسائنمينٽس", "اسائنمنٹ", "ڪم", "کام", "آخري تاريخ", "آخری تاریخ",
     "ايندڙ", "ایندڙ", "باقي", "باقی", "مدد", "هيلپ", "ہیلپ", "سلام",
     # Request & action words
@@ -319,6 +332,9 @@ STRINGS = {
             "TaleemGo AI commands:\n"
             "courses\nassignments\nupcoming\n"
             "grades [course]\n"
+            "plan [course] [target]\n"
+            "digest [on [HH:MM] | off]\n"
+            "calendar\n"
             "resources <course>\nattendance [course]\nclos <course>\n"
             "download <course> [week N | title]\n"
             "logout  — disconnect your account\n"
@@ -353,6 +369,24 @@ STRINGS = {
         "no_grades_posted": "No grades posted yet",
         "graded_so_far": "Graded so far: {obtained}/{max_total} ({graded} of {total} graded)",
         "grades_heading": "{course} Grades",
+        "plan_heading": "Attendance Plan (Target: {target}%):",
+        "plan_safe": "{course}: {pres}/{tot} ({pct}%) — You can miss {can_miss} more class(es) and stay at or above {target}%.",
+        "plan_need": "{course}: {pres}/{tot} ({pct}%) — You must attend the next {must_attend} class(es) in a row to reach {target}%.",
+        "plan_no_records": "{course}: No attendance recorded",
+        "plan_assumption": "(Assuming each upcoming class adds 1 to total)",
+        "plan_what_if": "If you miss {miss} class(es) in {course}, your attendance will be {pct}% ({pres}/{new_total}).",
+        "plan_invalid_target": "Target attendance percentage must be between 1 and 99%.",
+        "digest_status_on": "Daily digest is ON (scheduled for {time} daily).",
+        "digest_status_off": "Daily digest is OFF. Send `digest on [HH:MM]` to enable.",
+        "digest_enabled": "Daily digest enabled for {time} daily.",
+        "digest_disabled": "Daily digest disabled.",
+        "digest_invalid_time": "Invalid time format. Please provide time as HH:MM in 24-hour format (e.g. 07:30 or 20:00).",
+        "digest_header": "Good morning! Here is your TaleemGo AI daily digest:",
+        "digest_nothing_due": "Nothing due in the next 3 days.",
+        "digest_no_updates": "No new lectures or grades in the last 24 hours.",
+        "digest_att_ok": "All course attendances are above {warn}%.",
+        "calendar_no_deadlines": "You have no upcoming deadlines to add to your calendar.",
+        "calendar_caption": "Here is your calendar file (.ics) with {count} upcoming deadline(s).",
     },
     "ur": {
         "help": (
@@ -361,6 +395,9 @@ STRINGS = {
             "assignments\n"
             "upcoming\n"
             "grades [course]\n"
+            "plan [course] [target]\n"
+            "digest [on [HH:MM] | off]\n"
+            "calendar\n"
             "resources <course>\n"
             "attendance [course]\n"
             "clos <course>\n"
@@ -397,6 +434,24 @@ STRINGS = {
         "no_grades_posted": "ابھی تک کوئی گریڈ جاری نہیں ہوا",
         "graded_so_far": "اب تک کے گریڈ: {obtained}/{max_total} ({total} میں سے {graded} گریڈ ہو چکے)",
         "grades_heading": "{course} گریڈز",
+        "plan_heading": "حاضری کا پلان (ہدف: {target}%):",
+        "plan_safe": "{course}: {pres}/{tot} ({pct}%) — آپ اگلی {can_miss} کلاسیں چھوڑ سکتے ہیں اور {target}% یا اس سے اوپر رہیں گے۔",
+        "plan_need": "{course}: {pres}/{tot} ({pct}%) — {target}% تک پہنچنے کے لیے آپ کو مسلسل اگلی {must_attend} کلاسیں لینی ہوں گی۔",
+        "plan_no_records": "{course}: حاضری کا کوئی ریکارڈ نہیں ملا",
+        "plan_assumption": "(فرض کیا گیا ہے کہ ہر اگلی کلاس کل میں 1 اضافہ کرے گی)",
+        "plan_what_if": "اگر آپ {course} میں {miss} کلاسیں چھوڑتے ہیں، تو آپ کی حاضری {pct}% ({pres}/{new_total}) ہو جائے گی۔",
+        "plan_invalid_target": "ہدف حاضری کا فیصد 1 اور 99% کے درمیان ہونا چاہیے۔",
+        "digest_status_on": "روزانہ خلاصہ آن ہے (روزانہ {time} بجے کے لیے مقرر)۔",
+        "digest_status_off": "روزانہ خلاصہ آف ہے۔ آن کرنے کے لیے `digest on [HH:MM]` بھیجیں۔",
+        "digest_enabled": "روزانہ خلاصہ آن کر دیا گیا ہے (روزانہ {time})۔",
+        "digest_disabled": "روزانہ خلاصہ بند کر دیا گیا ہے۔",
+        "digest_invalid_time": "وقت کا غلط فارمیٹ۔ براہ کرم 24 گھنٹے کے فارمیٹ میں HH:MM بھیجیں (مثلاً 07:30)۔",
+        "digest_header": "صبح بخیر! یہ ہے آپ کا تعلیم گو اے آئی روزانہ خلاصہ:",
+        "digest_nothing_due": "اگلے 3 دنوں میں کوئی اسائنمنٹ باقی نہیں ہے۔",
+        "digest_no_updates": "گزشتہ 24 گھنٹوں میں کوئی نیا لیکچر یا گریڈ نہیں آیا۔",
+        "digest_att_ok": "تمام کورسز کی حاضری {warn}% سے اوپر ہے۔",
+        "calendar_no_deadlines": "آپ کے کیلنڈر میں شامل کرنے کے لیے کوئی آنے والی ڈیڈ لائن نہیں ہے۔",
+        "calendar_caption": "یہ رہا آپ کا کیلنڈر (.ics) فائل جس میں {count} ڈیڈ لائنز ہیں۔",
     },
     "sd": {
         "help": (
@@ -405,6 +460,9 @@ STRINGS = {
             "assignments\n"
             "upcoming\n"
             "grades [course]\n"
+            "plan [course] [target]\n"
+            "digest [on [HH:MM] | off]\n"
+            "calendar\n"
             "resources <course>\n"
             "attendance [course]\n"
             "clos <course>\n"
@@ -441,6 +499,24 @@ STRINGS = {
         "no_grades_posted": "اڃا ڪو گريڊ پوسٽ نه ٿيو آهي",
         "graded_so_far": "هاڻي تائين جا گريڊ: {obtained}/{max_total} ({total} مان {graded} گريڊ ٿيل)",
         "grades_heading": "{course} گريڊ",
+        "plan_heading": "حاضري جو پلان (هدف: {target}%):",
+        "plan_safe": "{course}: {pres}/{tot} ({pct}%) — توهان ايندڙ {can_miss} ڪلاسون ڇڏي سگهو ٿا ۽ {target}% يا ان کان مٿي رهندؤ.",
+        "plan_need": "{course}: {pres}/{tot} ({pct}%) — {target}% تائين پهچڻ لاءِ توهان کي لڳاتار ايندڙ {must_attend} ڪلاسون وٺڻيون پونديون.",
+        "plan_no_records": "{course}: حاضري جو ڪو به رڪارڊ ناهي مليو",
+        "plan_assumption": "(فرض ڪيل آهي ته هر ايندڙ ڪلاس ڪل ۾ 1 اضافو ڪندي)",
+        "plan_what_if": "جيڪڏهن توهان {course} ۾ {miss} ڪلاسون ڇڏيو ٿا، ته توهان جي حاضري {pct}% ({pres}/{new_total}) ٿي ويندي.",
+        "plan_invalid_target": "هدف حاضري جو فيصد 1 ۽ 99% جي وچ ۾ هجڻ گهرجي.",
+        "digest_status_on": "روزانو خلاصو آن آهي (روزانو {time} تي مقرر)۔",
+        "digest_status_off": "روزانو خلاصو بند آهي. آن ڪرڻ لاءِ `digest on [HH:MM]` موڪليو۔",
+        "digest_enabled": "روزانو خلاصو آن ڪيو ويو آهي (روزانو {time})۔",
+        "digest_disabled": "روزانو خلاصو بند ڪيو ويو آهي۔",
+        "digest_invalid_time": "وقت جو غلط فارميٽ۔ مهرباني ڪري 24 ڪلاڪن واري فارميٽ ۾ HH:MM لکو (مثال 07:30)۔",
+        "digest_header": "صبح بخير! هي آهي اوهان جو تعليم گو اي آءِ روزانو خلاصو:",
+        "digest_nothing_due": "ايندڙ 3 ڏينهن ۾ ڪا به اسائنمينٽ باقي ناهي.",
+        "digest_no_updates": "گذريل 24 ڪلاڪن ۾ ڪو نئون ليڪچر يا گريڊ ناهي آيو.",
+        "digest_att_ok": "سڀني ڪورسز جي حاضري {warn}% کان مٿي آهي.",
+        "calendar_no_deadlines": "توهان جي ڪئلينڊر ۾ شامل ڪرڻ لاءِ ڪا به ايندڙ ڊيڊلائن ناهي.",
+        "calendar_caption": "هي رهي توهان جي ڪئلينڊر (.ics) فائيل جنهن ۾ {count} ڊيڊلائنز آهن.",
     },
 }
 
@@ -534,6 +610,24 @@ FEW_SHOT_EXAMPLES = [
     {
         "input": {"user_message": "Download latest lecture from AI", "has_pending_download": False, "stored_lang": "en"},
         "output": {"lang": "en", "actions": [{"intent": "download", "course_query": "AI", "latest": True}], "clarify": None, "off_topic": False, "unsupported": False}
+    },
+    # Positive: Plan examples
+    {
+        "input": {"user_message": "can I miss 3 classes in HCI", "has_pending_download": False, "stored_lang": "en"},
+        "output": {"lang": "en", "actions": [{"intent": "plan", "course_query": "HCI", "miss": 3}], "clarify": None, "off_topic": False, "unsupported": False}
+    },
+    {
+        "input": {"user_message": "AI me kitni classes miss kar sakta hoon", "has_pending_download": False, "stored_lang": "ur-roman"},
+        "output": {"lang": "ur-roman", "actions": [{"intent": "plan", "course_query": "AI"}], "clarify": None, "off_topic": False, "unsupported": False}
+    },
+    # Positive: Digest and Calendar
+    {
+        "input": {"user_message": "turn on daily digest at 08:00", "has_pending_download": False, "stored_lang": "en"},
+        "output": {"lang": "en", "actions": [{"intent": "digest", "enable": True, "time": "08:00"}], "clarify": None, "off_topic": False, "unsupported": False}
+    },
+    {
+        "input": {"user_message": "send my deadlines to Google Calendar", "has_pending_download": False, "stored_lang": "en"},
+        "output": {"lang": "en", "actions": [{"intent": "calendar"}], "clarify": None, "off_topic": False, "unsupported": False}
     },
     # Unsupported LMS request (GPA, timetable, fees, etc.)
     {
