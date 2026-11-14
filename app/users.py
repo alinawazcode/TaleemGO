@@ -373,6 +373,7 @@ def purge_user_data(chat_id: str):
     clear_pending_action(chat_id)
     clear_strikes(chat_id)
     clear_hourly_calls(chat_id)
+    clear_voice_counts(chat_id)
     try:
         try:
             from app.llm.intent import clear_user_history
@@ -561,4 +562,34 @@ def check_and_record_llm_limit(chat_id: str) -> bool:
             return False
         calls.append(now)
         _user_hourly_calls[chat_id] = calls
+        return True
+
+
+# --- Voice hourly rate-limit ---
+
+_user_voice_counts: dict = {}
+_voice_counts_lock = threading.Lock()
+
+
+def clear_voice_counts(chat_id: str):
+    with _voice_counts_lock:
+        _user_voice_counts.pop(chat_id, None)
+
+
+def check_and_record_voice_limit(chat_id: str) -> bool:
+    """
+    Check if user exceeded VOICE_LIMIT_PER_HOUR (default 10).
+    Returns True if allowed (and records the call), False if limit exceeded.
+    Uses a 1-hour sliding window.
+    """
+    limit = int(os.environ.get("VOICE_LIMIT_PER_HOUR", "10"))
+    now = time.time()
+    with _voice_counts_lock:
+        calls = _user_voice_counts.get(chat_id, [])
+        calls = [ts for ts in calls if now - ts < 3600]
+        if len(calls) >= limit:
+            _user_voice_counts[chat_id] = calls
+            return False
+        calls.append(now)
+        _user_voice_counts[chat_id] = calls
         return True

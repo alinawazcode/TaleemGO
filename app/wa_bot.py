@@ -35,6 +35,17 @@ import users as usr                                                     # noqa: 
 from wa_monitor import run_all_users                                    # noqa: E402
 
 try:
+    from app.llm import stt
+    stt_transcribe = stt.transcribe
+except ImportError:
+    try:
+        import llm.stt as stt
+        stt_transcribe = stt.transcribe
+    except ImportError:
+        stt = None
+        stt_transcribe = None
+
+try:
     from app.llm.lang_data import (
         ACTIVATION_PHRASES_DEFAULT,
         KEYWORDS,
@@ -77,6 +88,8 @@ logging.basicConfig(level=logging.INFO)
 TOKEN = os.environ.get("BRIDGE_TOKEN", "")
 MAX_USERS = int(os.environ.get("MAX_USERS", "5"))
 ATTENDANCE_WARN = float(os.environ.get("ATTENDANCE_WARN", "75"))
+VOICE_MAX_SECONDS = int(os.environ.get("VOICE_MAX_SECONDS", "30"))
+VOICE_MAX_BYTES = int(os.environ.get("VOICE_MAX_BYTES", "2000000"))
 
 ACTIVATION_PHRASES = [
     p.strip().lower()
@@ -1256,6 +1269,7 @@ def _handle_cmd_users(chat_id: str):
 
 def _handle_cmd_llm(chat_id: str):
     summary = registry.get_summary()
+    stt_summary = stt.get_summary() if (stt and hasattr(stt, "get_summary")) else {}
     locked_count = usr.count_locked_users()
     lines = ["TaleemGo AI LLM Status:"]
     for prov, data in summary.items():
@@ -1264,6 +1278,14 @@ def _handle_cmd_llm(chat_id: str):
         calls = data["calls_today"]
         last_err = data["last_error"]
         lines.append(f"- {prov}: {status} (model: {model}) | calls today: {calls} | last error: {last_err}")
+    if stt_summary:
+        lines.append("\nSTT Providers:")
+        for prov, data in stt_summary.items():
+            status = data["status"]
+            model = data.get("model", "")
+            calls = data.get("calls_today", 0)
+            last_err = data.get("last_error", "none")
+            lines.append(f"- {prov} (STT): {status} (model: {model}) | calls today: {calls} | last error: {last_err}")
     lines.append(f"\nLocked users: {locked_count} locked")
     _reply(chat_id, "\n".join(lines))
 
@@ -1277,6 +1299,13 @@ def _handle_cmd_llm_test(chat_id: str):
             lines.append(f"- {prov}: ok ({model_id}, {int(latency)}ms)")
         else:
             lines.append(f"- {prov}: {status} ({model_id})")
+    if stt and hasattr(stt, "run_live_check") and hasattr(stt, "get_configured_stt_providers"):
+        for prov in stt.get_configured_stt_providers():
+            status, model_id, latency = stt.run_live_check(prov)
+            if status == "ok":
+                lines.append(f"- {prov} (STT): ok ({model_id}, {int(latency)}ms)")
+            else:
+                lines.append(f"- {prov} (STT): {status} ({model_id})")
     _reply(chat_id, "\n".join(lines))
 
 
@@ -1287,6 +1316,103 @@ def handle(chat_id: str, text: str, is_self: bool = False):
     lock = usr.get_lock(chat_id)
     with lock:
         _handle_locked(chat_id, text, is_self)
+
+
+def handle_audio(chat_id: str, audio_data: dict, is_self: bool = False):
+    """Handle incoming voice/audio message. Called via run_in_threadpool."""
+    lock = usr.get_lock(chat_id)
+    with lock:
+        _handle_audio_locked(chat_id, audio_data, is_self)
+
+
+def _handle_audio_locked(chat_id: str, audio_data: dict, is_self: bool = False):
+    """
+    Voice message gate logic (all checks before transcription):
+    1. Unknown user → silently ignore (no reply, no audio sent anywhere)
+    2. Sign-up states (awaiting_email, awaiting_password) → localised rejection, audio dropped
+    3. Active but locked out → silently ignore
+    4. Hourly rate limit → localised rejection
+    5. Mime type check → localised rejection for non-audio
+    6. Transcribe → voice_not_understood if empty
+    7. Prepend "I heard:" and process transcript through normal text pipeline
+    """
+    user = usr.get_user(chat_id)
+
+    # 1. Unknown user: silently ignore
+    if user is None:
+        return
+
+    # Known user
+    if is_self and not user.get("is_admin"):
+        usr.upsert_user(chat_id, is_admin=1)
+        user["is_admin"] = 1
+
+    lang = user.get("lang", "en")
+    status = user.get("status", "awaiting_email")
+
+    # 2. Sign-up states: reject with localised message, do NOT transcribe
+    if status in ("awaiting_email", "awaiting_password"):
+        _reply(chat_id, t("voice_signup_rejected", lang))
+        return
+
+    # Only active users beyond this point
+    if status != "active":
+        return
+
+    # 3. Lockout check
+    is_admin = bool(user.get("is_admin"))
+    if usr.is_llm_locked(chat_id, is_admin=is_admin):
+        return
+
+    # 4. Hourly rate limit
+    if not usr.check_and_record_voice_limit(chat_id):
+        _reply(chat_id, t("voice_rate_limit", lang))
+        return
+
+    # 5. Mime type check
+    mime = (audio_data.get("mime") or "").lower()
+    if not mime.startswith("audio/"):
+        _reply(chat_id, t("voice_wrong_mime", lang))
+        return
+
+    # 6. Size/duration check (Python-side defense in depth; bridge already checked)
+    seconds = float(audio_data.get("seconds") or 0.0)
+    if seconds > VOICE_MAX_SECONDS:
+        _reply(chat_id, t("voice_too_long", lang, max_seconds=VOICE_MAX_SECONDS))
+        return
+
+    data_b64 = audio_data.get("data_b64") or ""
+    if not data_b64:
+        _reply(chat_id, t("voice_not_understood", lang))
+        return
+    # Estimate raw bytes
+    raw_bytes = len(data_b64) * 3 // 4
+    if raw_bytes > VOICE_MAX_BYTES:
+        _reply(chat_id, t("voice_too_large", lang))
+        return
+
+    # 7. Transcribe
+    if stt_transcribe is None:
+        _reply(chat_id, t("voice_not_understood", lang))
+        return
+
+    try:
+        transcript = stt_transcribe(data_b64, mime, seconds, lang_hint=lang)
+    except Exception:
+        log.exception("[VOICE] STT raised exception for %s…", chat_id[-6:])
+        transcript = None
+
+    if not transcript or not transcript.strip():
+        _reply(chat_id, t("voice_not_understood", lang))
+        return
+
+    transcript_trimmed = transcript.strip()[:200]
+
+    # 8. Send "I heard:" prefix
+    _reply(chat_id, t("voice_heard", lang, transcript=transcript_trimmed))
+
+    # 9. Process transcript through normal text pipeline (same as typed message)
+    _handle_active(chat_id, transcript.strip(), user)
 
 
 def _handle_locked(chat_id: str, text: str, is_self: bool = False):
@@ -1907,9 +2033,13 @@ async def incoming(request: Request, x_token: str = Header(default="")):
         raise HTTPException(401)
     body = await request.json()
     chat_id = body.get("chat_id", "").strip()
-    text = body.get("text", "").strip()
+    text = (body.get("text") or "").strip()
     is_self = bool(body.get("is_self", False))
+    audio_data = body.get("audio")  # Optional: {"mime": str, "data_b64": str, "seconds": float}
     if not chat_id:
         raise HTTPException(400, "chat_id required")
-    await run_in_threadpool(handle, chat_id, text, is_self)
+    if audio_data is not None:
+        await run_in_threadpool(handle_audio, chat_id, audio_data, is_self)
+    else:
+        await run_in_threadpool(handle, chat_id, text, is_self)
     return {"ok": True}

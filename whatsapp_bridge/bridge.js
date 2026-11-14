@@ -268,10 +268,44 @@ if (require.main === module) {
         }
       }
 
+      const suffix = (chat_id || "").slice(-6);
+
+      // Handle voice/audio messages (ptt = push-to-talk voice note, audio = audio file)
+      if (msg.type === "ptt" || msg.type === "audio") {
+        const VOICE_MAX_SECONDS = parseInt(process.env.VOICE_MAX_SECONDS || "30", 10);
+        const VOICE_MAX_BYTES = parseInt(process.env.VOICE_MAX_BYTES || "2000000", 10);
+        const durationSecs = msg.duration || 0;
+        if (durationSecs > VOICE_MAX_SECONDS) {
+          console.log(`[VOICE] ...${suffix} rejected: ${durationSecs}s > ${VOICE_MAX_SECONDS}s limit`);
+          return;
+        }
+        try {
+          const media = await msg.downloadMedia();
+          if (!media || !media.data) return;
+          // Estimate raw bytes from base64 length
+          const rawBytes = Math.ceil(media.data.length * 3 / 4);
+          if (rawBytes > VOICE_MAX_BYTES) {
+            console.log(`[VOICE] ...${suffix} rejected: ~${rawBytes} bytes > ${VOICE_MAX_BYTES} limit`);
+            return;
+          }
+          console.log(`[VOICE] ...${suffix} ${durationSecs}s ~${rawBytes}B`);
+          const payload = { chat_id, audio: { mime: media.mimetype, data_b64: media.data, seconds: durationSecs } };
+          if (is_self) payload.is_self = true;
+          const resp = await fetch(PY_URL, {
+            method: "POST",
+            headers: { "Content-Type": "application/json", "x-token": TOKEN },
+            body: JSON.stringify(payload),
+          });
+          if (!resp.ok) console.error(`[VOICE-FWD] Python error ${resp.status} for ...${suffix}`);
+        } catch (e) {
+          console.error("[VOICE] download/forward failed:", e.message);
+        }
+        return; // Don't fall through to text handler
+      }
+
       if (!msg.body) return;
 
       // Log only suffix and length — never the content
-      const suffix = chat_id.slice(-6);
       console.log(`[MSG] ...${suffix} len=${msg.body.length}`);
 
       const payload = { chat_id, text: msg.body };
@@ -293,7 +327,7 @@ if (require.main === module) {
   });
 
   const app = express();
-  app.use(express.json({ limit: "1mb" }));
+  app.use(express.json({ limit: "25mb" }));
   app.use((req, res, next) =>
     req.get("x-token") === TOKEN ? next() : res.status(401).json({ error: "bad token" })
   );
