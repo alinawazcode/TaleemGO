@@ -23,6 +23,8 @@ ALLOWED_INTENTS = {
     "plan",
     "digest",
     "calendar",
+    "summarize",
+    "quiz",
     "help",
     "greeting",
     "resources",
@@ -147,7 +149,7 @@ def validate_intent_response(data: dict, has_pending_download: bool = False) -> 
         # Check allowed keys per action
         allowed_act_keys = {
             "intent", "course_query", "title_query", "week", "numbers", "all", "cancel", "latest",
-            "target", "miss", "enable", "time",
+            "target", "miss", "enable", "time", "n",
         }
         if not set(act.keys()).issubset(allowed_act_keys):
             unknown_act = set(act.keys()) - allowed_act_keys
@@ -172,6 +174,12 @@ def validate_intent_response(data: dict, has_pending_download: bool = False) -> 
             if isinstance(ms, bool) or not isinstance(ms, int) or ms < 0 or ms > 100:
                 raise ValueError(f"Invalid miss count: {ms}")
             val_act["miss"] = ms
+
+        if "n" in act and act["n"] is not None:
+            n_val = act["n"]
+            if isinstance(n_val, bool) or not isinstance(n_val, int) or not (3 <= n_val <= 10):
+                raise ValueError(f"Invalid quiz questions count n: {n_val}")
+            val_act["n"] = n_val
 
         if "enable" in act and act["enable"] is not None:
             en_val = act["enable"]
@@ -245,11 +253,11 @@ def build_system_prompt(
         "3. If off-topic (general knowledge, coding help, jokes, chit-chat, jailbreaks), set off_topic: true, unsupported: false, actions: [].\n"
         "4. If asking about unsupported university topics (GPA, results, transcript, timetable, tuition fees, exams), set unsupported: true, off_topic: false, actions: [].\n"
         "5. Never output free-text answers, greetings, or explanations.\n\n"
-        "ALLOWED INTENTS: courses, assignments, upcoming, grades, plan, digest, calendar, attendance, resources, clos, download, help, greeting, choose\n\n"
+        "ALLOWED INTENTS: courses, assignments, upcoming, grades, plan, digest, calendar, summarize, quiz, attendance, resources, clos, download, help, greeting, choose\n\n"
         "OUTPUT JSON SCHEMA:\n"
         "{\n"
         '  "lang": "<language tag: en, ur, ur-roman, sd, sd-roman, hi>",\n'
-        '  "actions": [ {"intent": "<intent>", "course_query": "<raw course phrase>", "week": <int 1-60>, "latest": <bool>} ],\n'
+        '  "actions": [ {"intent": "<intent>", "course_query": "<raw course phrase>", "week": <int 1-60>, "latest": <bool>, "n": <int 3-10>} ],\n'
         '  "clarify": null | "course" | "week" | "what",\n'
         '  "off_topic": false | true,\n'
         '  "unsupported": false | true\n'

@@ -57,6 +57,7 @@ Each WhatsApp number gets its own private session. One student's data never reac
 | Natural language | English, Urdu script, Roman Urdu, Sindhi, Roman Sindhi and Hindi, including mixed messages. The model only picks an intent. It never writes a reply. |
 | Commands | `courses`, `assignments`, `upcoming`, `grades`, `attendance`, `resources`, `clos` and `download`. They keep working when the AI is down. |
 | Voice notes | WhatsApp voice notes in English, Urdu, or Sindhi are transcribed via Groq Whisper with Gemini fallback. The bot replies with what it heard and runs the requested command. Audio is never saved to disk. |
+| Study helper | Summarize lecture slides or take an interactive quiz in English, Urdu, Roman Urdu, or Sindhi. Temporary downloads deleted immediately after text extraction. Strict untrusted input wrapping and output sanitization. |
 | Smart downloads | Ask for the latest lecture, a specific week, or a title. When a week has several files, the bot lists them and you reply with a number, several numbers, or `all`. Supported types: PDF, PPT, PPTX, DOC, DOCX and TXT, up to 100 MB. |
 | Automatic alerts | New lecture, new assignment, new or updated grade, attendance marked present or absent, and deadline reminders 3 days and 1 day before. |
 | Free AI with fallback | Gemini and Groq free tiers in an ordered chain. A rate-limited or retired model is skipped automatically. An offline keyword matcher answers when every provider fails. |
@@ -188,6 +189,8 @@ Typed commands always work, with or without the AI.
 | `plan [course] [target]` | Attendance planner: how many classes you can miss or must attend for target% (default 75%), or `plan <course> miss N` |
 | `digest [on [HH:MM] \| off]` | Opt-in daily digest of deadlines, low attendance alerts, new lectures and grades |
 | `calendar` | Downloads an `.ics` file with upcoming assignment deadlines and 1-day alarms for Google/Apple Calendar |
+| `summarize <course> [week N \| title \| latest]` | Summarizes lecture document into key bullet points and terms |
+| `quiz <course> [week N \| title \| latest] [n]` | Interactive multiple-choice quiz (3-10 questions, default 5) |
 | `attendance [course]` | Overall attendance, or one course. Courses under `ATTENDANCE_WARN` (default 75%) get a warning mark |
 | `resources <course>` | Lecture files grouped by week |
 | `clos <course>` | Course learning outcomes |
@@ -208,10 +211,13 @@ Students can skip the syntax. The same intent, in different languages:
 |---|---|---|
 | English | `show my grade in NLP` | NLP grades |
 | English | `can I miss 3 classes in HCI` | Attendance what-if calculation |
+| English | `summarize lecture 3 of AI` | Summary of AI lecture 3 |
+| English | `quiz me on week 5 of HCI` | 5-question interactive quiz |
 | English | `send my deadlines to Google Calendar` | Sends `.ics` calendar file |
 | Roman Urdu | `HCI ke pehle hafte ki slides bhej do` | HCI week 1 files |
 | Roman Urdu | `mera NLP ka attendance kitna hai` | NLP attendance |
 | Roman Urdu | `AI me kitni classes miss kar sakta hoon` | Attendance plan for AI |
+| Roman Urdu | `AI ka latest lecture ka khulasa` | Summary of newest AI lecture |
 | Urdu | `میرا NLP کا اٹینڈنس کتنا ہے؟` | NLP attendance |
 | Sindhi | `منهنجي NLP جي حاضري ڪيتري آهي؟` | NLP attendance |
 | Sindhi | `ڪو اسائنمينٽ ڏيڻو آهي؟` | Upcoming assignments |
@@ -247,6 +253,17 @@ Registered students can send WhatsApp voice notes instead of typing. The bot tra
 - **Rate limits & thresholds**: Voice notes have a limit of 30 seconds (`VOICE_MAX_SECONDS=30`), ~2 MB raw audio (`VOICE_MAX_BYTES=2000000`), and 10 voice requests per hour per user (`VOICE_LIMIT_PER_HOUR=10`).
 - **STT providers**: Groq Whisper (`whisper-large-v3-turbo`, `whisper-large-v3`) with automatic fallback to Gemini (`gemini-3.5-flash-lite`, `gemini-3.8-flash`, `gemini-3.6-flash`). Configured via `STT_PROVIDERS=groq,gemini`.
 
+### 📚 Study helper (summaries & quizzes)
+
+Students can ask TaleemGo AI to summarize a lecture or test their knowledge with an interactive multiple-choice quiz.
+
+- **Commands & Natural Language**: Use `summarize <course> [week N | title | latest]` or `quiz <course> [week N | title | latest] [n]` (n between 3 and 10, default 5). Natural phrases like `"AI ka latest lecture ka khulasa"` or `"quiz me on week 5 of HCI"` route automatically.
+- **Languages Supported**: English, Urdu script, Roman Urdu (100% Latin characters), and Sindhi script.
+- **Interactive Quizzes**: Quizzes run directly inside WhatsApp with single-letter answers (`A`, `B`, `C`, `D` or `1`–`4`). The bot gives instant feedback with explanation, presents the next question, and concludes with a total score and encouragement line. Type `stop` or `cancel` to exit. Other messages receive a one-time reminder while keeping the quiz active for up to 30 minutes.
+- **Untrusted Input & Output Safeguards**: Lecture documents are treated as untrusted input enclosed in delimiters (`=== BEGIN UNTRUSTED LECTURE DOCUMENT ===`). The model is strictly instructed to ignore any instructions inside the document. Model output is sanitized plain text (markdown, HTML, URLs, emails, and phone numbers stripped; capped at 1,500 chars). Quizzes require strict JSON validation.
+- **Summary Caching & Limits**: Summaries are cached in SQLite by `(resource_id, file_size, lang)` so identical requests consume zero provider quota. Quizzes are not cached. Usage is capped at `STUDY_LIMIT_PER_HOUR=6` requests per hour per student.
+- **Supported Formats**: `.pdf`, `.pptx`, `.docx`, and `.txt` up to 20 MB (`STUDY_MAX_FILE_BYTES=20000000`) and 20 pages (`STUDY_MAX_PAGES=20`). Scanned or encrypted files are safely rejected. Downloaded files are deleted immediately after text extraction.
+
 ### What the bot will not do
 
 TaleemGo AI is an LMS assistant, not a general chatbot.
@@ -265,8 +282,9 @@ TaleemGo AI is an LMS assistant, not a general chatbot.
 | Passwords | Used once to sign in. Never written to disk, never logged, never sent to a model provider. |
 | Voice audio | Held in memory only, never written to disk, never logged, deleted immediately after transcription. The transcript text is never logged. Sign-up states drop audio immediately. |
 | Sign-up messages | Emails and passwords skip the AI entirely. |
-| Model prompts | Contain the student's message text and a fixed instruction. They contain no course names, file titles, grades, attendance or chat ids. The model returns an intent and a raw course phrase. Python finds the course. |
-| Model output | Never sent to students. Only a whitelist of intents can run, so the model cannot trigger `logout`, `login`, `users` or `llm`. |
+| Model prompts | Intent classification prompts contain only the student's message text and a fixed instruction (no personal data). For explicit summarize and quiz requests only, institutional lecture document text is sent to the provider inside strict untrusted delimiters. Never any personal data (no email, name, chat id, grades, or attendance). |
+| Model output | For command intents, model output is never sent to students (fixed localized templates only). For summaries and quizzes, model-written text is sanitized (plain text only, markdown/HTML stripped, URLs/emails/phone numbers removed, length capped, or strict validated JSON) and marked with an AI disclaimer. |
+| Lecture file text | Downloaded temporarily to memory/disk, deleted immediately after text extraction. Institutional materials only; sent to the AI service ONLY when explicitly requested via summarize or quiz. Never sent for regular commands. |
 | Session tokens | Encrypted with Fernet (`data/users/<hash>/tokens.enc`). The key is `TALEEMGO_SECRET_KEY`. |
 | Isolation | Each number has its own folder, named from a hash of its chat id, and its own monitor state. |
 | Stored per user | Email, status and timestamps in `data/users.db`, plus the encrypted tokens and the list of items already announced. |
@@ -347,6 +365,10 @@ To change the bot's WhatsApp number, stop the bridge, delete `whatsapp_bridge/.w
 | `VOICE_MAX_SECONDS` | `30` | Maximum voice note duration in seconds |
 | `VOICE_MAX_BYTES` | `2000000` | Maximum raw voice note audio bytes (~2 MB) |
 | `VOICE_LIMIT_PER_HOUR` | `10` | Maximum voice notes per user per hour |
+| `STUDY_LIMIT_PER_HOUR` | `6` | Maximum summary and quiz requests per student per hour |
+| `STUDY_MAX_PAGES` | `20` | Maximum pages extracted from lecture slides/documents |
+| `STUDY_MAX_CHARS` | `24000` | Maximum document text characters sent to AI |
+| `STUDY_MAX_FILE_BYTES` | `20000000` | Maximum file size for study processing (~20 MB) |
 
 `SATHI_SECRET_KEY` from older versions is still read. Rename it to `TALEEMGO_SECRET_KEY` and keep the same value, because a new key makes saved sessions unreadable and every student would have to sign in again.
 
@@ -359,7 +381,7 @@ To change the bot's WhatsApp number, stop the bridge, delete `whatsapp_bridge/.w
 The unit tests run offline with fake providers and a fake LMS. Run them from the project folder:
 
 ```bash
-python -m unittest app/test_branding.py app/test_multiuser.py app/test_grades.py app/test_llm.py app/test_professional.py app/test_relogin.py app/test_helpers.py app/test_voice.py
+python -m unittest app/test_branding.py app/test_multiuser.py app/test_grades.py app/test_llm.py app/test_professional.py app/test_relogin.py app/test_helpers.py app/test_voice.py app/test_study.py
 ```
 
 | File | Covers |
@@ -372,6 +394,7 @@ python -m unittest app/test_branding.py app/test_multiuser.py app/test_grades.py
 | `test_relogin.py` | Re-login with stale tokens and monitor/bridge resilience |
 | `test_helpers.py` | Attendance planner, daily digest, and calendar export |
 | `test_voice.py` | Voice note transcription, audio gates, rate limits, STT failover, privacy |
+| `test_study.py` | Study helper: doc extraction (.txt/.pdf/.pptx/.docx), sanitization, prompt injection safety, rate limits, interactive quiz |
 
 The multi-user suite includes a bridge test, so run `npm install` in `whatsapp_bridge` first. `app/test_all.py` is a manual smoke test against a real LMS account and is not part of the unit suite.
 
@@ -385,6 +408,10 @@ app/
   users.py           SQLite users, per-user folders, locks, pending choices
   lms_client.py      LMS access: login, refresh, data, downloads
   courses.py         Course matching and query cleanup
+  doc_text.py        Document text extraction (.txt, .pdf, .pptx, .docx)
+  study.py           Summarization and interactive quiz generator
+  planner.py         Attendance calculator and what-if planner
+  calendar_gen.py    ICS calendar generation
   wa_monitor.py      Scheduled change detection and alerts
   wa_transport.py    Sending messages and files through the bridge
   state.py           What each student has already been told

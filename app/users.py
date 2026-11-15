@@ -91,6 +91,16 @@ def init_db():
                 PRIMARY KEY (lang, key)
             )
         """)
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS summary_cache (
+                resource_id TEXT NOT NULL,
+                file_size   INTEGER NOT NULL,
+                lang        TEXT NOT NULL,
+                summary     TEXT NOT NULL,
+                created_at  TEXT NOT NULL,
+                PRIMARY KEY (resource_id, lang)
+            )
+        """)
         c.commit()
 
 
@@ -374,6 +384,8 @@ def purge_user_data(chat_id: str):
     clear_strikes(chat_id)
     clear_hourly_calls(chat_id)
     clear_voice_counts(chat_id)
+    clear_study_counts(chat_id)
+    clear_active_quiz(chat_id)
     try:
         try:
             from app.llm.intent import clear_user_history
@@ -593,3 +605,87 @@ def check_and_record_voice_limit(chat_id: str) -> bool:
         calls.append(now)
         _user_voice_counts[chat_id] = calls
         return True
+
+
+# --- Summary cache (SQLite) ---
+
+def get_cached_summary(resource_id: str, file_size: int, lang: str) -> Optional[str]:
+    with _db_lock, _conn() as c:
+        row = c.execute(
+            "SELECT summary FROM summary_cache WHERE resource_id = ? AND file_size = ? AND lang = ?",
+            (str(resource_id), int(file_size), str(lang))
+        ).fetchone()
+        return row[0] if row else None
+
+
+def set_cached_summary(resource_id: str, file_size: int, lang: str, summary: str):
+    now_iso = datetime.now(timezone.utc).isoformat()
+    with _db_lock, _conn() as c:
+        c.execute("""
+            INSERT INTO summary_cache (resource_id, file_size, lang, summary, created_at)
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(resource_id, lang) DO UPDATE SET
+                file_size = excluded.file_size,
+                summary = excluded.summary,
+                created_at = excluded.created_at
+        """, (str(resource_id), int(file_size), str(lang), summary, now_iso))
+        c.commit()
+
+
+# --- Study hourly rate-limit ---
+
+_user_study_counts: dict = {}
+_study_counts_lock = threading.Lock()
+
+
+def clear_study_counts(chat_id: str):
+    with _study_counts_lock:
+        _user_study_counts.pop(chat_id, None)
+
+
+def check_and_record_study_limit(chat_id: str) -> bool:
+    """
+    Check if user exceeded STUDY_LIMIT_PER_HOUR (default 6).
+    Returns True if allowed (and records the call), False if limit exceeded.
+    Uses a 1-hour sliding window.
+    """
+    limit = int(os.environ.get("STUDY_LIMIT_PER_HOUR", "6"))
+    now = time.time()
+    with _study_counts_lock:
+        calls = _user_study_counts.get(chat_id, [])
+        calls = [ts for ts in calls if now - ts < 3600]
+        if len(calls) >= limit:
+            _user_study_counts[chat_id] = calls
+            return False
+        calls.append(now)
+        _user_study_counts[chat_id] = calls
+        return True
+
+
+# --- In-memory active quizzes (30 min TTL) ---
+
+_active_quizzes: dict = {}
+_quiz_lock = threading.Lock()
+
+
+def get_active_quiz(chat_id: str) -> Optional[dict]:
+    with _quiz_lock:
+        q = _active_quizzes.get(chat_id)
+        if not q:
+            return None
+        if time.time() > q.get("expires_at", 0):
+            _active_quizzes.pop(chat_id, None)
+            return None
+        return q
+
+
+def set_active_quiz(chat_id: str, quiz_data: dict):
+    with _quiz_lock:
+        quiz_data["expires_at"] = time.time() + quiz_data.get("ttl", 1800)
+        _active_quizzes[chat_id] = quiz_data
+
+
+def clear_active_quiz(chat_id: str):
+    with _quiz_lock:
+        _active_quizzes.pop(chat_id, None)
+
