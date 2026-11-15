@@ -236,7 +236,13 @@ KEYWORDS = {
         "ڪيتريون ڪلاسون", "ڇڏي سگهان", "حاضری پلان", "حاضري پلان",
     ],
     "digest": [
-        "digest", "daily digest", "daily update", "صبح کا خلاصہ", "روزانو خلاصو", "خلاصہ", "خلاصو",
+        "digest", "daily digest", "daily update", "صبح کا خلاصہ", "روزانو خلاصو",
+    ],
+    "summarize": [
+        "summarize", "summarise", "summary", "khulasa", "mukhtasar", "خلاصہ", "خلاصو", "مختصر",
+    ],
+    "quiz": [
+        "quiz", "test me", "practice", "sawal", "sawalat", "imtihan", "ڪوئز", "کوئز", "سوال", "سوالات", "امتحان",
     ],
     "calendar": [
         "calendar", "ics", "google calendar", "کیلنڈر", "ڪئلينڊر", "schedule export",
@@ -272,6 +278,7 @@ COURSE_FILLER_WORDS_LATIN = [
     "grade", "grades", "marks", "nambar", "number",
     "plan", "bunk", "miss", "chhutti", "safe",
     "digest", "calendar", "schedule",
+    "summarize", "summarise", "summary", "khulasa", "mukhtasar", "quiz", "sawal", "sawalat",
     "assignment", "assignments", "homework", "deadline", "deadlines", "due", "kam", "kaam",
     "upcoming", "pending", "baqi", "baki",
     "clo", "clos", "outcome", "outcomes",
@@ -295,6 +302,7 @@ COURSE_FILLER_WORDS_ARABIC = [
     # Intent keywords
     "حاضري", "حاضری", "گريڊ", "گریڈ", "مارڪس", "مارکس", "نمبر", "سي ايل او", "سی ایل او",
     "پلان", "چھٹی", "خلاصہ", "خلاصو", "کیلنڈر", "ڪئلينڊر",
+    "کوئز", "ڪوئز", "سوال", "سوالات", "امتحان", "مختصر",
     "اسائنمينٽ", "اسائنمينٽس", "اسائنمنٹ", "ڪم", "کام", "آخري تاريخ", "آخری تاریخ",
     "ايندڙ", "ایندڙ", "باقي", "باقی", "مدد", "هيلپ", "ہیلپ", "سلام",
     # Request & action words
@@ -337,6 +345,8 @@ STRINGS = {
             "calendar\n"
             "resources <course>\nattendance [course]\nclos <course>\n"
             "download <course> [week N | title]\n"
+            "summarize <course> [week N | title | latest]\n"
+            "quiz <course> [week N | title | latest] [n]\n"
             "logout  — disconnect your account\n"
             "login   — re-link after session expiry"
         ),
@@ -396,6 +406,21 @@ STRINGS = {
         "voice_not_understood": "I couldn't make out that voice note. Please try again or type your message.",
         "voice_download_failed": "I couldn't download that voice note, please try again or type it.",
         "voice_heard": "🎤 I heard: \"{transcript}\"",
+        "study_file_scanned": "I can't read this file, it looks like scanned images.",
+        "study_file_encrypted": "This file is password-protected and cannot be read.",
+        "study_file_too_large": "This file is too large to process (maximum 20 MB).",
+        "study_file_unsupported": "This file type isn't supported here.",
+        "study_file_empty": "I couldn't extract any text from this file.",
+        "study_rate_limit": "You have reached your hourly limit for summaries and quizzes (max 6 per hour). Please try again later.",
+        "study_failed": "I couldn't produce that this time. Please try again later.",
+        "quiz_reminder": "You have an active quiz. Reply with A, B, C, or D to answer, or 'stop' to cancel.",
+        "quiz_stopped": "Quiz cancelled.",
+        "quiz_correct": "✅ Correct!",
+        "quiz_incorrect": "❌ Incorrect. The correct answer was {letter}: {option}",
+        "quiz_completed": "🎉 Quiz completed! Your score: {score}/{total}.",
+        "quiz_encouragement_high": "Excellent job! You have a great grasp of this lecture.",
+        "quiz_encouragement_medium": "Good effort! Review the lecture slides to reinforce key topics.",
+        "quiz_encouragement_low": "Keep practicing! Re-read the lecture materials and try again.",
     },
     "ur": {
         "help": (
@@ -411,6 +436,8 @@ STRINGS = {
             "attendance [course]\n"
             "clos <course>\n"
             "download <course> [week N | title]\n"
+            "summarize <course> [week N | title | latest]\n"
+            "quiz <course> [week N | title | latest] [n]\n"
             "logout\n"
             "login"
         ),
@@ -470,6 +497,21 @@ STRINGS = {
         "voice_not_understood": "میں وائس نوٹ سمجھ نہیں سکا۔ دوبارہ کوشش کریں یا پیغام ٹائپ کریں۔",
         "voice_download_failed": "میں وہ وائس نوٹ ڈاؤنلوڈ نہیں کر سکا، براہ کرم دوبارہ کوشش کریں یا ٹائپ کریں۔",
         "voice_heard": "🎤 میں نے سنا: \"{transcript}\"",
+        "study_file_scanned": "میں یہ فائل نہیں پڑھ سکا، ایسا لگتا ہے کہ یہ اسکین شدہ تصاویر ہیں۔",
+        "study_file_encrypted": "یہ فائل پاس ورڈ سے محفوظ ہے اور اسے پڑھا نہیں جا سکتا۔",
+        "study_file_too_large": "یہ فائل بہت بڑی ہے (زیادہ سے زیادہ 20 ایم بی)۔",
+        "study_file_unsupported": "فائل کی یہ قسم یہاں سپورٹ نہیں ہے۔",
+        "study_file_empty": "میں اس فائل سے کوئی متن حاصل نہیں کر سکا۔",
+        "study_rate_limit": "آپ خلاصوں اور کوئزز کی فی گھنٹہ حد تک پہنچ چکے ہیں (زیادہ سے زیادہ 6 فی گھنٹہ)۔ براہ کرم بعد میں کوشش کریں۔",
+        "study_failed": "میں اس وقت یہ تیار نہیں کر سکا۔ براہ کرم بعد میں دوبارہ کوشش کریں۔",
+        "quiz_reminder": "آپ کا ایک کوئز جاری ہے۔ جواب دینے کے لیے A، B، C، یا D لکھیں، یا ختم کرنے کے لیے 'stop' لکھیں۔",
+        "quiz_stopped": "کوئز منسوخ کر دیا گیا۔",
+        "quiz_correct": "✅ بالکل درست!",
+        "quiz_incorrect": "❌ غلط۔ صحیح جواب {letter}: {option} تھا",
+        "quiz_completed": "🎉 کوئز مکمل! آپ کا اسکور: {score}/{total}۔",
+        "quiz_encouragement_high": "بہترین! آپ کو اس لیکچر پر بہترین عبور حاصل ہے۔",
+        "quiz_encouragement_medium": "اچھی کوشش! اہم موضوعات کو پختہ کرنے کے لیے سلائیڈز کا دوبارہ جائزہ لیں۔",
+        "quiz_encouragement_low": "مشق جاری رکھیں! لیکچر کا مواد دوبارہ پڑھیں اور دوبارہ کوشش کریں۔",
     },
     "sd": {
         "help": (
@@ -485,6 +527,8 @@ STRINGS = {
             "attendance [course]\n"
             "clos <course>\n"
             "download <course> [week N | title]\n"
+            "summarize <course> [week N | title | latest]\n"
+            "quiz <course> [week N | title | latest] [n]\n"
             "logout\n"
             "login"
         ),
@@ -544,6 +588,21 @@ STRINGS = {
         "voice_not_understood": "مان وائس نوٽ سمجهي نه سگهيس. ٻيهر ڪوشش ڪريو يا پيغام ٽائيپ ڪريو.",
         "voice_download_failed": "مان اهو وائس نوٽ ڊائونلوڊ نه ڪري سگهيس، مهرباني ڪري ٻيهر ڪوشش ڪريو يا ٽائيپ ڪريو.",
         "voice_heard": "🎤 مون ٻڌو: \"{transcript}\"",
+        "study_file_scanned": "مان هي فائيل پڙهي نه سگهيس، لڳي ٿو ته هي اسڪين ٿيل تصويرون آهن.",
+        "study_file_encrypted": "هي فائيل پاسورڊ سان محفوظ آهي ۽ پڙهي نٿو سگهجي.",
+        "study_file_too_large": "هي فائيل تمام وڏي آهي (وڌ کان وڌ 20 ايم بي)۔",
+        "study_file_unsupported": "فائيل جو هي قسم هتي سپورٽ ناهي.",
+        "study_file_empty": "مان هن فائيل مان ڪو به لکت نه ڪڍي سگهيس.",
+        "study_rate_limit": "توهان خلاصن ۽ ڪوئزز جي في ڪلاڪ حد تائين پهچي ويا آهيو (وڌ ۾ وڌ 6 في ڪلاڪ)۔ مهرباني ڪري پوءِ ڪوشش ڪريو۔",
+        "study_failed": "مان هن وقت اهو تيار نه ڪري سگهيس. مهرباني ڪري پوءِ ٻيهر ڪوشش ڪريو.",
+        "quiz_reminder": "توهان جو هڪ ڪوئز جاري آهي. جواب ڏيڻ لاءِ A، B، C، يا D لکو، يا بند ڪرڻ لاءِ 'stop' لکو.",
+        "quiz_stopped": "ڪوئز رد ڪيو ويو.",
+        "quiz_correct": "✅ بلڪل صحيح!",
+        "quiz_incorrect": "❌ غلط. صحيح جواب {letter}: {option} هو",
+        "quiz_completed": "🎉 ڪوئز پورو ٿيو! اوهان جو اسڪور: {score}/{total}۔",
+        "quiz_encouragement_high": "تمام بهترين! توهان کي هن ليڪچر تي سٺي گرفت حاصل آهي.",
+        "quiz_encouragement_medium": "سٺي ڪوشش! اهم موضوعن کي پڪو ڪرڻ لاءِ سلائيڊس ٻيهر ڏسو.",
+        "quiz_encouragement_low": "مشق جاري رکو! ليڪچر جو مواد ٻيهر پڙهو ۽ ٻيهر ڪوشش ڪريو.",
     },
     "ur-roman": {
         "plan_heading": "Attendance Plan (Target: {target}%):",
@@ -565,6 +624,21 @@ STRINGS = {
         "calendar_no_deadlines": "Aapke calendar mein shaamil karne ke liye koi aane wali deadline nahi hai.",
         "calendar_caption": "Yeh raha aapka calendar file (.ics) jis mein {count} upcoming deadline(s) hain.",
         "login_failed_password": "Login nakam ho gaya, barah-e-karam apna LMS password dobara bhejein.",
+        "study_file_scanned": "Main yeh file nahi parh saka, lagta hai yeh scanned images hain.",
+        "study_file_encrypted": "Yeh file password se protected hai aur parhi nahi ja sakti.",
+        "study_file_too_large": "Yeh file bahut badi hai (maximum 20 MB).",
+        "study_file_unsupported": "Yeh file type yahan support nahi hai.",
+        "study_file_empty": "Main is file se koi text extract nahi kar saka.",
+        "study_rate_limit": "Aap summaries aur quizzes ki hourly limit tak pohanch gaye hain (max 6 per hour). Thodi der baad dobara koshish karein.",
+        "study_failed": "Main is waqt yeh generate nahi kar saka. Barah-e-karam baad mein dobara koshish karein.",
+        "quiz_reminder": "Aap ka ek quiz active hai. Jawab dene ke liye A, B, C, ya D bhejein, ya band karne ke liye 'stop' likhein.",
+        "quiz_stopped": "Quiz cancel kar diya gaya.",
+        "quiz_correct": "✅ Bilkul sahi!",
+        "quiz_incorrect": "❌ Ghalat. Sahi jawab {letter}: {option} tha",
+        "quiz_completed": "🎉 Quiz complete! Aap ka score: {score}/{total}.",
+        "quiz_encouragement_high": "Zabardast! Aap ka is lecture par behtareen grasp hai.",
+        "quiz_encouragement_medium": "Achi koshish! Khaas topics ko revise karne ke liye slides dobara dekhein.",
+        "quiz_encouragement_low": "Koshish jari rakhein! Lecture material dobara parhein aur phir koshish karein.",
     },
 }
 
@@ -690,6 +764,15 @@ FEW_SHOT_EXAMPLES = [
         "input": {"user_message": "send my deadlines to Google Calendar", "has_pending_download": False, "stored_lang": "en"},
         "output": {"lang": "en", "actions": [{"intent": "calendar"}], "clarify": None, "off_topic": False, "unsupported": False}
     },
+    # Positive: Study Helpers (Summarize and Quiz)
+    {
+        "input": {"user_message": "Summarize Lecture 3 of AI", "has_pending_download": False, "stored_lang": "en"},
+        "output": {"lang": "en", "actions": [{"intent": "summarize", "course_query": "AI", "week": 3}], "clarify": None, "off_topic": False, "unsupported": False}
+    },
+    {
+        "input": {"user_message": "quiz me on week 5 of HCI 4", "has_pending_download": False, "stored_lang": "en"},
+        "output": {"lang": "en", "actions": [{"intent": "quiz", "course_query": "HCI", "week": 5, "n": 4}], "clarify": None, "off_topic": False, "unsupported": False}
+    },
     # Unsupported LMS request (GPA, timetable, fees, etc.)
     {
         "input": {"user_message": "What is my current GPA?", "has_pending_download": False, "stored_lang": "en"},
@@ -738,6 +821,7 @@ def select_few_shot_examples(user_text: str = "", has_pending_download: bool = F
     user_lower = (user_text or "").lower()
     is_grades_query = any(w in user_lower for w in ("grade", "grades", "mark", "marks", "نمبر", "گریڈ", "گريڊ"))
     is_latest_query = any(w in user_lower for w in ("latest", "newest", "recent", "last", "naya", "nayi", "akhri", "آخری", "آخري"))
+    is_study_query = any(w in user_lower for w in ("summarize", "summary", "khulasa", "quiz", "sawal", "خلاصہ", "خلاصو", "کوئز", "ڪوئز"))
 
     positives = []
     if has_arabic_script or is_arabic_lang:
@@ -784,6 +868,18 @@ def select_few_shot_examples(user_text: str = "", has_pending_download: bool = F
             {"input": {"user_message": "HCI jo pehrio hafto moklyo", "has_pending_download": False, "stored_lang": "sd-roman"},
              "output": {"lang": "sd-roman", "actions": [{"intent": "download", "course_query": "HCI", "week": 1}], "clarify": None, "off_topic": False, "unsupported": False}},
         ]
+
+    if is_study_query:
+        if any(qw in user_lower for qw in ("quiz", "sawal", "کوئز", "ڪوئز")):
+            positives[1] = {
+                "input": {"user_message": "quiz me on week 5 of HCI 4", "has_pending_download": False, "stored_lang": "en"},
+                "output": {"lang": "en", "actions": [{"intent": "quiz", "course_query": "HCI", "week": 5, "n": 4}], "clarify": None, "off_topic": False, "unsupported": False}
+            }
+        else:
+            positives[1] = {
+                "input": {"user_message": "Summarize Lecture 3 of AI", "has_pending_download": False, "stored_lang": "en"},
+                "output": {"lang": "en", "actions": [{"intent": "summarize", "course_query": "AI", "week": 3}], "clarify": None, "off_topic": False, "unsupported": False}
+            }
 
     if has_pending_download:
         positives[3] = {
