@@ -147,8 +147,16 @@ def _stt_record_bad_model(provider: str, model: str):
 
 
 def get_configured_stt_providers() -> list[str]:
-    raw = os.environ.get("STT_PROVIDERS", "groq,gemini")
-    return [p.strip().lower() for p in raw.split(",") if p.strip()]
+    try:
+        from .capacity import get_stt_providers
+        return get_stt_providers()
+    except ImportError:
+        try:
+            from app.llm.capacity import get_stt_providers
+            return get_stt_providers()
+        except ImportError:
+            raw = os.environ.get("STT_PROVIDERS", "groq,gemini")
+            return [p.strip().lower() for p in raw.split(",") if p.strip()]
 
 
 _get_stt_providers = get_configured_stt_providers

@@ -36,10 +36,37 @@ from wa_monitor import run_all_users                                    # noqa: 
 
 try:
     from app.doc_text import extract_document_text
-    from app.study import generate_summary, generate_quiz, format_quiz_question
+    from app.study import generate_summary, generate_quiz, format_quiz_question, StudyBusyError
 except ImportError:
     from doc_text import extract_document_text
-    from study import generate_summary, generate_quiz, format_quiz_question
+    from study import generate_summary, generate_quiz, format_quiz_question, StudyBusyError
+
+try:
+    from app.llm.capacity import (
+        can_run_rules_first,
+        generate_capacity_report,
+        get_rules_first_stats,
+        intent_cache,
+        is_exhibition_mode,
+        record_intent_handled,
+    )
+except ImportError:
+    try:
+        from llm.capacity import (
+            can_run_rules_first,
+            generate_capacity_report,
+            get_rules_first_stats,
+            intent_cache,
+            is_exhibition_mode,
+            record_intent_handled,
+        )
+    except ImportError:
+        can_run_rules_first = lambda t, r, l: False
+        generate_capacity_report = lambda: ""
+        get_rules_first_stats = lambda: {}
+        intent_cache = None
+        is_exhibition_mode = lambda: False
+        record_intent_handled = lambda is_rule: None
 
 try:
     from app.llm import stt
@@ -155,6 +182,10 @@ def _start_monitor():
     sched.start()
     api.state.sched = sched
     log.info("Monitor scheduled every %d min; daily digest every 1 min; stale cleanup every 2 min", minutes)
+
+    if is_exhibition_mode():
+        report = generate_capacity_report()
+        log.info("\n" + report)
 
     def _startup_llm_check():
         if not is_llm_enabled():
@@ -1230,6 +1261,8 @@ def _execute_summarize_resource(chat_id: str, lms, resource: dict, lang: str = "
             _reply(chat_id, summary)
         else:
             _reply(chat_id, t("study_failed", lang))
+    except StudyBusyError:
+        _reply(chat_id, t("study_busy", lang))
     except LMSError as e:
         log.warning("LMS download failed: %s", type(e).__name__)
         _reply(chat_id, t("file_failed", lang, filename=resource.get("title", "file")))
@@ -1294,6 +1327,8 @@ def _execute_quiz_resource(chat_id: str, lms, resource: dict, n: int = 5, lang: 
         usr.set_active_quiz(chat_id, quiz_state)
         first_q = format_quiz_question(questions[0], 0, len(questions), is_first=True)
         _reply(chat_id, first_q)
+    except StudyBusyError:
+        _reply(chat_id, t("study_busy", lang))
     except LMSError as e:
         log.warning("LMS download failed: %s", type(e).__name__)
         _reply(chat_id, t("file_failed", lang, filename=resource.get("title", "file")))
@@ -1825,13 +1860,30 @@ def _handle_cmd_llm(chat_id: str):
     summary = registry.get_summary()
     stt_summary = stt.get_summary() if (stt and hasattr(stt, "get_summary")) else {}
     locked_count = usr.count_locked_users()
+    rf_stats = get_rules_first_stats() if get_rules_first_stats else {}
+    cache_stats = intent_cache.stats() if intent_cache else {}
+
     lines = ["TaleemGo AI LLM Status:"]
     for prov, data in summary.items():
         status = data["status"]
         model = data.get("model", "")
         calls = data["calls_today"]
         last_err = data["last_error"]
-        lines.append(f"- {prov}: {status} (model: {model}) | calls today: {calls} | last error: {last_err}")
+        line = f"- {prov}: {status} (model: {model}) | calls today: {calls} | last error: {last_err}"
+
+        usage_parts = []
+        if data.get("rpm_pct") is not None:
+            usage_parts.append(f"RPM:{data['rpm_pct']}%")
+        if data.get("tpm_pct") is not None:
+            usage_parts.append(f"TPM:{data['tpm_pct']}%")
+        if data.get("rpd_pct") is not None:
+            usage_parts.append(f"RPD:{data['rpd_pct']}%")
+        if usage_parts:
+            line += f" | usage: {', '.join(usage_parts)}"
+        if data.get("chains"):
+            line += f" | chains: {','.join(data['chains'])}"
+        lines.append(line)
+
     if stt_summary:
         lines.append("\nSTT Providers:")
         for prov, data in stt_summary.items():
@@ -1840,6 +1892,15 @@ def _handle_cmd_llm(chat_id: str):
             calls = data.get("calls_today", 0)
             last_err = data.get("last_error", "none")
             lines.append(f"- {prov} (STT): {status} (model: {model}) | calls today: {calls} | last error: {last_err}")
+
+    # Telemetry for capacity, rules-first, and cache
+    if rf_stats:
+        rules_pct = rf_stats.get("rule_share_pct", 0.0)
+        lines.append(f"\nThroughput & Optimization:")
+        lines.append(f"- Rules-first: {rf_stats.get('rules_handled', 0)}/{rf_stats.get('total', 0)} ({rules_pct}% rule-handled)")
+    if cache_stats:
+        lines.append(f"- Intent Cache: {cache_stats.get('hits', 0)} hits, {cache_stats.get('misses', 0)} misses, {cache_stats.get('size', 0)}/{cache_stats.get('capacity', 500)} entries")
+
     lines.append(f"\nLocked users: {locked_count} locked")
     _reply(chat_id, "\n".join(lines))
 
@@ -2366,43 +2427,48 @@ def _handle_natural_language(chat_id: str, text: str, user: dict, lms):
     has_pending = (usr.get_pending(chat_id) is not None)
     stored_lang = user.get("lang", "en")
 
-    use_rules = False
-    if not is_llm_enabled():
-        use_rules = True
-    elif not usr.check_and_record_llm_limit(chat_id):
-        use_rules = True
-
+    rule_res = match_rules(clean_text, has_pending_download=has_pending, stored_lang=stored_lang)
     parsed = None
-    if not use_rules:
-        history = get_user_history(chat_id)
-        parsed = route_intent(
-            clean_text,
-            has_pending_download=has_pending,
-            stored_lang=stored_lang,
-            history=history,
-        )
-        if parsed is None:
+    use_rules = False
+
+    if can_run_rules_first(clean_text, rule_res, lms):
+        record_intent_handled(is_rule_handled=True)
+        parsed = rule_res
+    else:
+        if not is_llm_enabled():
+            use_rules = True
+        elif not usr.check_and_record_llm_limit(chat_id):
             use_rules = True
 
-    if use_rules:
-        rule_res = match_rules(clean_text, has_pending_download=has_pending, stored_lang=stored_lang)
-        if rule_res and rule_res.get("unsupported"):
-            resp_lang = rule_res.get("lang", stored_lang)
-            if resp_lang != user.get("lang"):
-                usr.upsert_user(chat_id, lang=resp_lang)
-                user["lang"] = resp_lang
-            effective_lang = user.get("lang", "en")
-            _reply(chat_id, t("unsupported", effective_lang, help=t("help", effective_lang)))
-            return
-        elif rule_res and rule_res.get("actions"):
-            parsed = rule_res
-        else:
-            if not is_llm_enabled():
-                _reply(chat_id, HELP)
+        if not use_rules:
+            history = get_user_history(chat_id)
+            parsed = route_intent(
+                clean_text,
+                has_pending_download=has_pending,
+                stored_lang=stored_lang,
+                history=history,
+            )
+            if parsed is None:
+                use_rules = True
+
+        if use_rules:
+            if rule_res and rule_res.get("unsupported"):
+                resp_lang = rule_res.get("lang", stored_lang)
+                if resp_lang != user.get("lang"):
+                    usr.upsert_user(chat_id, lang=resp_lang)
+                    user["lang"] = resp_lang
+                effective_lang = user.get("lang", "en")
+                _reply(chat_id, t("unsupported", effective_lang, help=t("help", effective_lang)))
+                return
+            elif rule_res and rule_res.get("actions"):
+                parsed = rule_res
             else:
-                is_busy = _are_all_providers_failing()
-                _maybe_send_help_fallback(chat_id, stored_lang, is_busy=is_busy)
-            return
+                if not is_llm_enabled():
+                    _reply(chat_id, HELP)
+                else:
+                    is_busy = _are_all_providers_failing()
+                    _maybe_send_help_fallback(chat_id, stored_lang, is_busy=is_busy)
+                return
 
     # Language determination follows CURRENT message unless signal-less
     detected_lang = detect_language(clean_text, stored_lang=stored_lang, is_recent=True)

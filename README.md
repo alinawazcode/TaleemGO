@@ -225,16 +225,34 @@ Students can skip the syntax. The same intent, in different languages:
 
 The bot answers in the language of the current message. A very short reply such as `2` or `ok` keeps the language of the previous message.
 
-### Free AI providers
+### Free AI providers & verified capacity
 
-Providers are tried in the order of `LLM_PROVIDERS`. If one is rate limited or down, the next one answers immediately.
+Providers are tried in the order of `INTENT_PROVIDERS` (for intent classification), `STUDY_PROVIDERS` (for summaries/quizzes), and `STT_PROVIDERS` (for voice notes). If one is rate limited or down, the next one answers immediately.
 
-| Provider | Free key | Default models |
-|---|---|---|
-| Google Gemini | [Google AI Studio](https://aistudio.google.com/) | `gemini-3.5-flash-lite`, `gemini-3.8-flash`, `gemini-3.6-flash` |
-| Groq | [Groq Console](https://console.groq.com/) | `openai/gpt-oss-20b`, `openai/gpt-oss-120b` |
-| OpenRouter (optional) | [OpenRouter](https://openrouter.ai/) | set `OPENROUTER_MODELS` |
-| Cerebras (optional) | [Cerebras Cloud](https://cloud.cerebras.ai/) | set `CEREBRAS_MODELS` |
+| Provider | Free limits (Verified 2026-11-15) | Default models | Data-use terms summary |
+|---|---|---|---|
+| **Google Gemini** | 15 RPM, 1,000,000 TPM, 1,500 RPD (per project) | `gemini-3.5-flash-lite`, `gemini-3.8-flash`, `gemini-3.6-flash` | Free tier inputs may be used to train Google products (no personal data in prompts). |
+| **Groq** | 30 RPM, 8,000 TPM, 1,000 RPD, 200,000 TPD (per model) | `openai/gpt-oss-20b`, `openai/gpt-oss-120b`, `qwen/qwen3.8-27b` | API data is not used to train models; 30-day retention for abuse monitoring. |
+| **Mistral** | ~30 RPM (free trial tier) | `mistral-small-latest`, `open-mistral-7b` | API data is not used for model training. |
+| **Cloudflare Workers AI** | 10,000 neurons/day (~10k requests) | `@cf/meta/llama-3.1-8b-instruct`, `@cf/meta/llama-3-8b-instruct` | Cloudflare does not train on customer inputs or logs. |
+| **Local LLM (Ollama)** | Unmetered (depends on local GPU/CPU) | `llama3.2:3b`, `qwen2.5:3b` | 100% private and on-premise; no data ever leaves the local machine. |
+| **OpenRouter** (optional) | 20 RPM, 50 RPD (`:free` models) | `meta-llama/llama-3.3-70b-instruct:free` | Varies per upstream provider. |
+| **Cerebras** (optional) | 30 RPM (requires verified payment method) | `llama3.1-8b` | API inputs not used for training. |
+
+### ⚡ AI capacity and resilience
+
+At university exhibitions or high-traffic events, multiple students interact simultaneously. TaleemGo AI enforces multiple layers of resilience:
+
+1. **Independent Feature Chains**: Configure separate provider failovers via `.env`:
+   - `INTENT_PROVIDERS`: High-priority intent classification (default: `gemini,groq`)
+   - `STUDY_PROVIDERS`: Low-priority study helper (default: `gemini,groq`)
+   - `STT_PROVIDERS`: High-priority voice transcription (default: `groq,gemini`)
+2. **Rules-First Fast Path**: Short, unambiguous messages (<= 8 words) with zero negations (e.g. "attendance", "grades", "what is my schedule") execute directly with **0 provider calls and 0 tokens consumed**.
+3. **Intent Caching**: Normalized LRU cache (500 entries) shared across all students. Identical intents (e.g., common exhibition queries) return in 0ms with zero provider calls. TTL is 1 hour (2 hours in exhibition mode). Never caches sign-up credentials or voice transcripts with digits.
+4. **Token-Aware Rate Limiting & Sliding Windows**: Tracks RPM, TPM, RPD, and TPD sliding windows per model. Before sending an HTTP call, the limiter checks available capacity. If a model's ceiling is reached, it skips to the next model without burning an HTTP request or encountering a 429 error.
+5. **Provider Concurrency Cap**: Caps concurrent in-flight requests per provider (`PROVIDER_CONCURRENCY=3`, default 3) with a priority queue (8s wait for high-priority intent/STT, 2s wait for study).
+6. **Load Shedding**: Under capacity pressure (> 80% ceiling usage across all study providers), low-priority study helper requests are shed immediately with a friendly localized message (`study_busy`), preserving all remaining capacity for critical intents and voice notes.
+7. **Exhibition Mode**: Set `EXHIBITION_MODE=1` to double cache TTL and log a full startup capacity and throughput report.
 
 Each message has a 12 second budget, with 6 seconds per request. When a model returns "not found", the bot moves to the next model in the list with no delay. When every provider fails, a student hits the hourly limit (`LLM_USER_LIMIT_PER_HOUR`, default 20), or `LLM_ENABLED=0`, the offline matcher in `app/llm/rules.py` handles the message.
 
@@ -349,8 +367,16 @@ To change the bot's WhatsApp number, stop the bridge, delete `whatsapp_bridge/.w
 | `DEBUG_SELF` | `0` | Set to `1` to print self-chat diagnostics |
 | `LLM_ENABLED` | `1` | Set to `0` to run on commands and offline rules only |
 | `LLM_PROVIDERS` | `gemini,groq` | Order of the provider chain |
-| `GEMINI_API_KEY`, `GROQ_API_KEY` | empty | Free keys. Optional: `OPENROUTER_API_KEY`, `CEREBRAS_API_KEY` |
+| `INTENT_PROVIDERS` | `gemini,groq` | Independent provider chain for high-priority intent classification |
+| `STUDY_PROVIDERS` | `gemini,groq` | Independent provider chain for low-priority study helper |
+| `STT_PROVIDERS` | `groq,gemini` | Ordered STT providers for voice transcription |
+| `PROVIDER_CONCURRENCY` | `3` | Max concurrent in-flight requests per provider |
+| `EXHIBITION_MODE` | `0` | Set to `1` for 2h cache TTL and startup capacity report |
+| `GEMINI_API_KEY`, `GROQ_API_KEY` | empty | Free keys. Optional: `MISTRAL_API_KEY`, `CLOUDFLARE_API_TOKEN`, `LOCAL_LLM_URL` |
 | `GEMINI_MODELS`, `GROQ_MODELS` | see above | Ordered model lists, comma separated |
+| `MISTRAL_MODELS` | `mistral-small-latest,open-mistral-7b` | Models for Mistral |
+| `CLOUDFLARE_MODELS` | `@cf/meta/llama-3.1-8b-instruct,...` | Models for Cloudflare Workers AI |
+| `LOCAL_LLM_MODELS` | `llama3.2:3b,qwen2.5:3b` | Models for local LLM (Ollama) |
 | `LLM_USER_LIMIT_PER_HOUR` | `20` | AI calls per student per hour |
 | `LLM_STRIKES` | `2` | Off-topic messages before a lockout |
 | `LLM_STRIKE_WINDOW_MIN` | `10` | Window for counting strikes |
@@ -381,7 +407,7 @@ To change the bot's WhatsApp number, stop the bridge, delete `whatsapp_bridge/.w
 The unit tests run offline with fake providers and a fake LMS. Run them from the project folder:
 
 ```bash
-python -m unittest app/test_branding.py app/test_multiuser.py app/test_grades.py app/test_llm.py app/test_professional.py app/test_relogin.py app/test_helpers.py app/test_voice.py app/test_study.py
+python -m unittest app/test_branding.py app/test_multiuser.py app/test_grades.py app/test_llm.py app/test_professional.py app/test_relogin.py app/test_helpers.py app/test_voice.py app/test_study.py app/test_capacity.py
 ```
 
 | File | Covers |
@@ -395,6 +421,7 @@ python -m unittest app/test_branding.py app/test_multiuser.py app/test_grades.py
 | `test_helpers.py` | Attendance planner, daily digest, and calendar export |
 | `test_voice.py` | Voice note transcription, audio gates, rate limits, STT failover, privacy |
 | `test_study.py` | Study helper: doc extraction (.txt/.pdf/.pptx/.docx), sanitization, prompt injection safety, rate limits, interactive quiz |
+| `test_capacity.py` | Capacity ceilings, sliding windows, concurrency queue, rules-first fast path, intent cache, load shedding |
 
 The multi-user suite includes a bridge test, so run `npm install` in `whatsapp_bridge` first. `app/test_all.py` is a manual smoke test against a real LMS account and is not part of the unit suite.
 
