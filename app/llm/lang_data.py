@@ -394,6 +394,7 @@ STRINGS = {
         "voice_rate_limit": "Too many voice notes. Please wait a while before sending another.",
         "voice_wrong_mime": "Only voice notes are supported, not this file type.",
         "voice_not_understood": "I couldn't make out that voice note. Please try again or type your message.",
+        "voice_download_failed": "I couldn't download that voice note, please try again or type it.",
         "voice_heard": "🎤 I heard: \"{transcript}\"",
     },
     "ur": {
@@ -467,6 +468,7 @@ STRINGS = {
         "voice_rate_limit": "بہت زیادہ وائس نوٹس۔ براہ کرم تھوڑی دیر انتظار کریں۔",
         "voice_wrong_mime": "صرف وائس نوٹس قبول ہوتے ہیں، یہ فائل قسم نہیں۔",
         "voice_not_understood": "میں وائس نوٹ سمجھ نہیں سکا۔ دوبارہ کوشش کریں یا پیغام ٹائپ کریں۔",
+        "voice_download_failed": "میں وہ وائس نوٹ ڈاؤنلوڈ نہیں کر سکا، براہ کرم دوبارہ کوشش کریں یا ٹائپ کریں۔",
         "voice_heard": "🎤 میں نے سنا: \"{transcript}\"",
     },
     "sd": {
@@ -540,6 +542,7 @@ STRINGS = {
         "voice_rate_limit": "تمام گهڻا وائس نوٽس. مهرباني ڪري ڪجهه دير انتظار ڪريو.",
         "voice_wrong_mime": "صرف وائس نوٽس قبول ٿيندا آهن، هي فائيل قسم نه.",
         "voice_not_understood": "مان وائس نوٽ سمجهي نه سگهيس. ٻيهر ڪوشش ڪريو يا پيغام ٽائيپ ڪريو.",
+        "voice_download_failed": "مان اهو وائس نوٽ ڊائونلوڊ نه ڪري سگهيس، مهرباني ڪري ٻيهر ڪوشش ڪريو يا ٽائيپ ڪريو.",
         "voice_heard": "🎤 مون ٻڌو: \"{transcript}\"",
     },
     "ur-roman": {
@@ -574,6 +577,7 @@ STRINGS["ur-roman"].update({
     "voice_rate_limit": "Bahut zyada voice notes. Thodi der baad dobara bhejein.",
     "voice_wrong_mime": "Sirf voice notes accept hote hain, yeh file type nahi.",
     "voice_not_understood": "Main yeh voice note samajh nahi saka. Dobara koshish karein ya type karein.",
+    "voice_download_failed": "Main woh voice note download nahi kar saka, dobara koshish karein ya type karein.",
     "voice_heard": "🎤 Maine suna: \"{transcript}\"",
 })
 

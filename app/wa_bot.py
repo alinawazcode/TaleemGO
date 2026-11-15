@@ -1325,6 +1325,39 @@ def handle_audio(chat_id: str, audio_data: dict, is_self: bool = False):
         _handle_audio_locked(chat_id, audio_data, is_self)
 
 
+def handle_audio_error(chat_id: str, is_self: bool = False):
+    """Handle bridge downloadMedia failure event. Called via run_in_threadpool."""
+    lock = usr.get_lock(chat_id)
+    with lock:
+        _handle_audio_error_locked(chat_id, is_self)
+
+
+def _handle_audio_error_locked(chat_id: str, is_self: bool = False):
+    user = usr.get_user(chat_id)
+    if user is None:
+        return
+
+    if is_self and not user.get("is_admin"):
+        usr.upsert_user(chat_id, is_admin=1)
+        user["is_admin"] = 1
+
+    lang = user.get("lang", "en")
+    status = user.get("status", "awaiting_email")
+
+    if status in ("awaiting_email", "awaiting_password"):
+        _reply(chat_id, t("voice_signup_rejected", lang))
+        return
+
+    if status != "active":
+        return
+
+    is_admin = bool(user.get("is_admin"))
+    if usr.is_llm_locked(chat_id, is_admin=is_admin):
+        return
+
+    _reply(chat_id, t("voice_download_failed", lang))
+
+
 def _handle_audio_locked(chat_id: str, audio_data: dict, is_self: bool = False):
     """
     Voice message gate logic (all checks before transcription):
@@ -2036,9 +2069,12 @@ async def incoming(request: Request, x_token: str = Header(default="")):
     text = (body.get("text") or "").strip()
     is_self = bool(body.get("is_self", False))
     audio_data = body.get("audio")  # Optional: {"mime": str, "data_b64": str, "seconds": float}
+    audio_error = bool(body.get("audio_error", False))
     if not chat_id:
         raise HTTPException(400, "chat_id required")
-    if audio_data is not None:
+    if audio_error:
+        await run_in_threadpool(handle_audio_error, chat_id, is_self)
+    elif audio_data is not None:
         await run_in_threadpool(handle_audio, chat_id, audio_data, is_self)
     else:
         await run_in_threadpool(handle, chat_id, text, is_self)
