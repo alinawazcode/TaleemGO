@@ -100,14 +100,39 @@ def is_valid_api_key(key: Optional[str]) -> bool:
     return True
 
 
+try:
+    from .providers import get_provider_keys
+except ImportError:
+    try:
+        from app.llm.providers import get_provider_keys
+    except ImportError:
+        def get_provider_keys(provider_name: str) -> list[str]:
+            k = os.environ.get(f"{provider_name.upper()}_API_KEY", "")
+            return [k] if is_valid_api_key(k) else []
+
+
 def _stt_is_available(provider: str) -> bool:
     with _stt_registry_lock:
-        state = _stt_registry.get(provider, {})
-    if state.get("disabled"):
+        if "#" in provider:
+            state = _stt_registry.get(provider, {})
+            if state.get("disabled"):
+                return False
+            if time.time() < state.get("cooldown_until", 0.0):
+                return False
+            return True
+
+        # Base provider name: available if at least one key instance is available
+        keys = get_provider_keys(provider)
+        if not keys:
+            return False
+        for idx in range(len(keys)):
+            inst = f"{provider}#{idx + 1}"
+            state = _stt_registry.get(inst)
+            if state is None:
+                return True
+            if not state.get("disabled") and time.time() >= state.get("cooldown_until", 0.0):
+                return True
         return False
-    if time.time() < state.get("cooldown_until", 0.0):
-        return False
-    return True
 
 
 def _stt_record_success(provider: str, model: Optional[str] = None):
@@ -196,86 +221,90 @@ def generate_silent_wav(duration_seconds: float = 1.0, sample_rate: int = 16000)
 # --- Groq Whisper provider ---
 
 def _transcribe_groq(audio_bytes: bytes, mime: str, seconds: float, lang_hint: Optional[str]) -> Optional[str]:
-    api_key = os.environ.get("GROQ_API_KEY", "")
-    if not is_valid_api_key(api_key):
+    keys = get_provider_keys("groq")
+    if not keys:
         return None
 
     models = _get_provider_models("groq")
     ext = _ext_for_mime(mime)
     filename = f"audio.{ext}"
-
-    # Map stored language to Whisper language code
     whisper_lang = _WHISPER_LANG_MAP.get(lang_hint, None) if lang_hint else None
 
-    for model in models:
-        try:
-            files = {
-                "file": (filename, io.BytesIO(audio_bytes), mime.split(";")[0].strip()),
-            }
-            data = {"model": model}
-            if whisper_lang:
-                data["language"] = whisper_lang
+    for key_idx, api_key in enumerate(keys):
+        inst = f"groq#{key_idx + 1}"
+        if not _stt_is_available(inst):
+            continue
 
-            start = time.time()
-            resp = requests.post(
-                GROQ_STT_URL,
-                headers={"Authorization": f"Bearer {api_key.strip()}"},
-                files=files,
-                data=data,
-                timeout=PER_PROVIDER_TIMEOUT,
-            )
-            latency = time.time() - start
+        for model in models:
+            try:
+                files = {
+                    "file": (filename, io.BytesIO(audio_bytes), mime.split(";")[0].strip()),
+                }
+                data = {"model": model}
+                if whisper_lang:
+                    data["language"] = whisper_lang
 
-            if resp.status_code == 200:
-                result = resp.json()
-                transcript = result.get("text", "").strip()
-                _stt_record_success("groq", model)
-                log.info("[STT] groq ok model=%s latency=%.2fs seconds=%.1f", model, latency, seconds)
-                return transcript if transcript else None
+                start = time.time()
+                resp = requests.post(
+                    GROQ_STT_URL,
+                    headers={"Authorization": f"Bearer {api_key.strip()}"},
+                    files=files,
+                    data=data,
+                    timeout=PER_PROVIDER_TIMEOUT,
+                )
+                latency = time.time() - start
 
-            elif resp.status_code == 429:
-                retry_after = float(resp.headers.get("retry-after", "60"))
-                _stt_record_cooldown("groq", min(retry_after, 300.0), err_class="RateLimit429")
-                return None
+                if resp.status_code == 200:
+                    result = resp.json()
+                    transcript = result.get("text", "").strip()
+                    _stt_record_success(inst, model)
+                    _stt_record_success("groq", model)
+                    log.info("[STT] groq ok model=%s latency=%.2fs seconds=%.1f", model, latency, seconds)
+                    return transcript if transcript else None
 
-            elif resp.status_code in (401, 403):
-                _stt_disable("groq", f"bad key HTTP {resp.status_code}")
-                return None
+                elif resp.status_code == 429:
+                    retry_after = float(resp.headers.get("retry-after", "60"))
+                    _stt_record_cooldown(inst, min(retry_after, 300.0), err_class="RateLimit429")
+                    _stt_record_cooldown("groq", min(retry_after, 300.0), err_class="RateLimit429")
+                    break
 
-            elif resp.status_code == 404 or (resp.status_code in (400, 422) and any(
-                p in resp.text.lower() for p in ("not found", "does not exist", "not supported", "decommissioned", "unknown model", "invalid model")
-            )):
-                _stt_record_bad_model("groq", model)
-                continue
+                elif resp.status_code in (401, 403):
+                    _stt_disable(inst, f"bad key HTTP {resp.status_code}")
+                    _stt_disable("groq", f"bad key HTTP {resp.status_code}")
+                    break
 
-            else:
-                _stt_record_cooldown("groq", 30.0, err_class=f"HTTP{resp.status_code}")
-                return None
+                elif resp.status_code == 404 or (resp.status_code in (400, 422) and any(
+                    p in resp.text.lower() for p in ("not found", "does not exist", "not supported", "decommissioned", "unknown model", "invalid model")
+                )):
+                    _stt_record_bad_model(inst, model)
+                    continue
 
-        except requests.Timeout:
-            log.warning("[STT] groq timeout model=%s", model)
-            _stt_record_cooldown("groq", 30.0, err_class="Timeout")
-            return None
-        except requests.ConnectionError:
-            log.warning("[STT] groq connection error model=%s", model)
-            _stt_record_cooldown("groq", 30.0, err_class="ConnectionError")
-            return None
-        except Exception as e:
-            log.warning("[STT] groq error %s model=%s", type(e).__name__, model)
-            _stt_record_cooldown("groq", 30.0, err_class=type(e).__name__)
-            return None
+                else:
+                    _stt_record_cooldown(inst, 30.0, err_class=f"HTTP{resp.status_code}")
+                    break
 
-    # All models exhausted
-    log.warning("[STT] groq all models exhausted")
-    _stt_record_cooldown("groq", 60.0, err_class="BadModel")
+            except requests.Timeout:
+                log.warning("[STT] groq timeout model=%s", model)
+                _stt_record_cooldown(inst, 30.0, err_class="Timeout")
+                break
+            except requests.ConnectionError:
+                log.warning("[STT] groq connection error model=%s", model)
+                _stt_record_cooldown(inst, 30.0, err_class="ConnectionError")
+                break
+            except Exception as e:
+                log.warning("[STT] groq error %s model=%s", type(e).__name__, model)
+                _stt_record_cooldown(inst, 30.0, err_class=type(e).__name__)
+                break
+
+    log.warning("[STT] groq all keys/models exhausted")
     return None
 
 
 # --- Gemini audio provider ---
 
 def _transcribe_gemini(audio_bytes: bytes, mime: str, seconds: float, lang_hint: Optional[str]) -> Optional[str]:
-    api_key = os.environ.get("GEMINI_API_KEY", "")
-    if not is_valid_api_key(api_key):
+    keys = get_provider_keys("gemini")
+    if not keys:
         return None
 
     models = _get_provider_models("gemini")
@@ -289,84 +318,91 @@ def _transcribe_gemini(audio_bytes: bytes, mime: str, seconds: float, lang_hint:
     elif lang_hint == "en":
         lang_text = " The audio is in English."
 
-    for model in models:
-        try:
-            audio_b64 = base64.b64encode(audio_bytes).decode("ascii")
-            mime_base = _mime_base(mime)
+    for key_idx, api_key in enumerate(keys):
+        inst = f"gemini#{key_idx + 1}"
+        if not _stt_is_available(inst):
+            continue
 
-            payload = {
-                "contents": [{
-                    "parts": [
-                        {
-                            "inline_data": {
-                                "mime_type": mime_base,
-                                "data": audio_b64,
+        for model in models:
+            try:
+                audio_b64 = base64.b64encode(audio_bytes).decode("ascii")
+                mime_base = _mime_base(mime)
+
+                payload = {
+                    "contents": [{
+                        "parts": [
+                            {
+                                "inline_data": {
+                                    "mime_type": mime_base,
+                                    "data": audio_b64,
+                                }
+                            },
+                            {
+                                "text": f"Transcribe this audio message exactly as spoken. Return only the transcript text, nothing else.{lang_text}"
                             }
-                        },
-                        {
-                            "text": f"Transcribe this audio message exactly as spoken. Return only the transcript text, nothing else.{lang_text}"
-                        }
-                    ]
-                }]
-            }
+                        ]
+                    }]
+                }
 
-            start = time.time()
-            resp = requests.post(
-                f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent",
-                headers={
-                    "x-goog-api-key": api_key.strip(),
-                    "Content-Type": "application/json",
-                },
-                json=payload,
-                timeout=PER_PROVIDER_TIMEOUT,
-            )
-            latency = time.time() - start
+                start = time.time()
+                resp = requests.post(
+                    f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent",
+                    headers={
+                        "x-goog-api-key": api_key.strip(),
+                        "Content-Type": "application/json",
+                    },
+                    json=payload,
+                    timeout=PER_PROVIDER_TIMEOUT,
+                )
+                latency = time.time() - start
 
-            if resp.status_code == 200:
-                data = resp.json()
-                try:
-                    transcript = data["candidates"][0]["content"]["parts"][0]["text"].strip()
-                    _stt_record_success("gemini", model)
-                    log.info("[STT] gemini ok model=%s latency=%.2fs seconds=%.1f", model, latency, seconds)
-                    return transcript if transcript else None
-                except (KeyError, IndexError):
-                    log.warning("[STT] gemini unexpected response structure model=%s", model)
+                if resp.status_code == 200:
+                    data = resp.json()
+                    try:
+                        transcript = data["candidates"][0]["content"]["parts"][0]["text"].strip()
+                        _stt_record_success(inst, model)
+                        _stt_record_success("gemini", model)
+                        log.info("[STT] gemini ok model=%s latency=%.2fs seconds=%.1f", model, latency, seconds)
+                        return transcript if transcript else None
+                    except (KeyError, IndexError):
+                        log.warning("[STT] gemini unexpected response structure model=%s", model)
+                        continue
+
+                elif resp.status_code == 429:
+                    retry_after = float(resp.headers.get("retry-after", "60"))
+                    _stt_record_cooldown(inst, min(retry_after, 300.0), err_class="RateLimit429")
+                    _stt_record_cooldown("gemini", min(retry_after, 300.0), err_class="RateLimit429")
+                    break
+
+                elif resp.status_code in (401, 403):
+                    _stt_disable(inst, f"bad key HTTP {resp.status_code}")
+                    _stt_disable("gemini", f"bad key HTTP {resp.status_code}")
+                    break
+
+                elif resp.status_code == 404 or (resp.status_code in (400, 422) and any(
+                    p in resp.text.lower() for p in ("not found", "does not exist", "not supported", "decommissioned")
+                )):
+                    _stt_record_bad_model(inst, model)
                     continue
 
-            elif resp.status_code == 429:
-                retry_after = float(resp.headers.get("retry-after", "60"))
-                _stt_record_cooldown("gemini", min(retry_after, 300.0), err_class="RateLimit429")
-                return None
+                else:
+                    _stt_record_cooldown(inst, 30.0, err_class=f"HTTP{resp.status_code}")
+                    break
 
-            elif resp.status_code in (401, 403):
-                _stt_disable("gemini", f"bad key HTTP {resp.status_code}")
-                return None
+            except requests.Timeout:
+                log.warning("[STT] gemini timeout model=%s", model)
+                _stt_record_cooldown(inst, 30.0, err_class="Timeout")
+                break
+            except requests.ConnectionError:
+                log.warning("[STT] gemini connection error model=%s", model)
+                _stt_record_cooldown(inst, 30.0, err_class="ConnectionError")
+                break
+            except Exception as e:
+                log.warning("[STT] gemini error %s model=%s", type(e).__name__, model)
+                _stt_record_cooldown(inst, 30.0, err_class=type(e).__name__)
+                break
 
-            elif resp.status_code == 404 or (resp.status_code in (400, 422) and any(
-                p in resp.text.lower() for p in ("not found", "does not exist", "not supported", "decommissioned")
-            )):
-                _stt_record_bad_model("gemini", model)
-                continue
-
-            else:
-                _stt_record_cooldown("gemini", 30.0, err_class=f"HTTP{resp.status_code}")
-                return None
-
-        except requests.Timeout:
-            log.warning("[STT] gemini timeout model=%s", model)
-            _stt_record_cooldown("gemini", 30.0, err_class="Timeout")
-            return None
-        except requests.ConnectionError:
-            log.warning("[STT] gemini connection error model=%s", model)
-            _stt_record_cooldown("gemini", 30.0, err_class="ConnectionError")
-            return None
-        except Exception as e:
-            log.warning("[STT] gemini error %s model=%s", type(e).__name__, model)
-            _stt_record_cooldown("gemini", 30.0, err_class=type(e).__name__)
-            return None
-
-    log.warning("[STT] gemini all models exhausted")
-    _stt_record_cooldown("gemini", 60.0, err_class="BadModel")
+    log.warning("[STT] gemini all keys/models exhausted")
     return None
 
 

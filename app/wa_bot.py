@@ -66,7 +66,7 @@ except ImportError:
         get_rules_first_stats = lambda: {}
         intent_cache = None
         is_exhibition_mode = lambda: False
-        record_intent_handled = lambda is_rule: None
+        record_intent_handled = lambda is_rule_handled: None
 
 try:
     from app.llm import stt
@@ -91,6 +91,9 @@ try:
     from app.llm.intent import add_user_history, get_user_history
     from app.llm.providers import (
         PROVIDER_CONFIGS,
+        get_key_for_instance,
+        get_provider_key_instances,
+        get_provider_keys,
         is_valid_api_key,
         registry,
         run_live_check,
@@ -109,6 +112,9 @@ except ImportError:
     from llm.intent import add_user_history, get_user_history
     from llm.providers import (
         PROVIDER_CONFIGS,
+        get_key_for_instance,
+        get_provider_key_instances,
+        get_provider_keys,
         is_valid_api_key,
         registry,
         run_live_check,
@@ -196,16 +202,18 @@ def _start_monitor():
                 cfg = PROVIDER_CONFIGS.get(prov)
                 if not cfg:
                     continue
-                raw_key = os.environ.get(cfg["env_key"], "")
-                if not is_valid_api_key(raw_key):
-                    continue
-                status, model_id, latency = run_live_check(prov)
-                if status == "ok":
-                    log.info("[LLM] %s OK model=%s %dms", prov, model_id, int(latency))
-                else:
-                    log.warning("[LLM] %s FAILED %s model=%s", prov, status, model_id)
+                instances = get_provider_key_instances(prov)
+                for inst in instances:
+                    raw_key = get_key_for_instance(inst)
+                    if not is_valid_api_key(raw_key, provider_name=prov):
+                        continue
+                    status, model_id, latency = run_live_check(inst)
+                    if status == "ok":
+                        log.info("[LLM] %s OK model=%s %dms", inst, model_id, int(latency))
+                    else:
+                        log.warning("[LLM] %s FAILED %s model=%s", inst, status, model_id)
         except Exception as e:
-            log.warning("Startup LLM live check error: %s", e)
+            log.warning("Startup LLM live check error: %s", type(e).__name__)
 
     threading.Thread(target=_startup_llm_check, daemon=True).start()
 
@@ -1909,11 +1917,13 @@ def _handle_cmd_llm_test(chat_id: str):
     providers = get_configured_providers()
     lines = ["TaleemGo AI LLM Test:"]
     for prov in providers:
-        status, model_id, latency = run_live_check(prov)
-        if status == "ok":
-            lines.append(f"- {prov}: ok ({model_id}, {int(latency)}ms)")
-        else:
-            lines.append(f"- {prov}: {status} ({model_id})")
+        instances = get_provider_key_instances(prov)
+        for inst in instances:
+            status, model_id, latency = run_live_check(inst)
+            if status == "ok":
+                lines.append(f"- {inst}: ok ({model_id}, {int(latency)}ms)")
+            else:
+                lines.append(f"- {inst}: {status} ({model_id})")
     if stt and hasattr(stt, "run_live_check") and hasattr(stt, "get_configured_stt_providers"):
         for prov in stt.get_configured_stt_providers():
             status, model_id, latency = stt.run_live_check(prov)
