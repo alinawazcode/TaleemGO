@@ -11,10 +11,18 @@ from typing import Optional
 
 import requests
 
+try:
+    from .capacity import limiter, get_intent_providers, get_study_providers, get_stt_providers
+except ImportError:
+    try:
+        from app.llm.capacity import limiter, get_intent_providers, get_study_providers, get_stt_providers
+    except ImportError:
+        from llm.capacity import limiter, get_intent_providers, get_study_providers, get_stt_providers
+
 log = logging.getLogger("taleemgo.llm.providers")
 
 # Config table of supported providers
-# Model IDs verified on 2026-11-08 against official provider documentation
+# Model IDs verified on 2026-11-15 against official provider documentation
 PROVIDER_CONFIGS = {
     "gemini": {
         "base_url": "https://generativelanguage.googleapis.com/v1beta/openai/",
@@ -29,8 +37,8 @@ PROVIDER_CONFIGS = {
         "env_key": "GROQ_API_KEY",
         "env_models": "GROQ_MODELS",
         "env_model_legacy": "GROQ_MODEL",
-        # Verified 2026-11-08 (openai/gpt-oss-20b, openai/gpt-oss-120b)
-        "default_models": ["openai/gpt-oss-20b", "openai/gpt-oss-120b"],
+        # Verified 2026-11-15 (openai/gpt-oss-20b, openai/gpt-oss-120b, qwen/qwen3.8-27b)
+        "default_models": ["openai/gpt-oss-20b", "openai/gpt-oss-120b", "qwen/qwen3.8-27b"],
     },
     "openrouter": {
         "base_url": "https://openrouter.ai/api/v1",
@@ -47,6 +55,33 @@ PROVIDER_CONFIGS = {
         "env_model_legacy": "CEREBRAS_MODEL",
         # Verified 2026-11-08
         "default_models": ["llama3.1-8b"],
+    },
+    "mistral": {
+        "base_url": "https://api.mistral.ai/v1",
+        "env_key": "MISTRAL_API_KEY",
+        "env_models": "MISTRAL_MODELS",
+        "env_model_legacy": "MISTRAL_MODEL",
+        # Verified 2026-11-15: mistral-small-latest, open-mistral-7b
+        "default_models": ["mistral-small-latest", "open-mistral-7b"],
+    },
+    "cloudflare": {
+        "base_url_template": "https://api.cloudflare.com/client/v4/accounts/{account_id}/ai/v1",
+        "env_key": "CLOUDFLARE_API_TOKEN",
+        "env_account_id": "CLOUDFLARE_ACCOUNT_ID",
+        "env_models": "CLOUDFLARE_MODELS",
+        "env_model_legacy": "CLOUDFLARE_MODEL",
+        # Verified 2026-11-15: @cf/meta/llama-3.1-8b-instruct, @cf/meta/llama-3-8b-instruct
+        "default_models": ["@cf/meta/llama-3.1-8b-instruct", "@cf/meta/llama-3-8b-instruct"],
+    },
+    "local": {
+        "env_url": "LOCAL_LLM_URL",
+        "default_url": "http://127.0.0.1:11434/v1",
+        "env_key": "LOCAL_LLM_KEY",
+        "env_models": "LOCAL_LLM_MODELS",
+        "env_model_legacy": "LOCAL_LLM_MODEL",
+        # Verified 2026-11-15: llama3.2:3b, qwen2.5:3b
+        "default_models": ["llama3.2:3b", "qwen2.5:3b"],
+        "no_auth_required": True,
     },
 }
 
@@ -83,11 +118,20 @@ class ClientError(LLMError):
     pass
 
 
-def is_valid_api_key(key: Optional[str]) -> bool:
+def is_valid_api_key(key: Optional[str], provider_name: Optional[str] = None) -> bool:
     """
     Treat an env key as missing when empty, shorter than 20 chars,
     or containing placeholder markers like 'your', 'here', 'xxxx', 'changeme'.
+    Special cases:
+    - 'local' provider requires no auth (key can be empty or anything).
+    - 'cloudflare' provider requires both valid token and non-empty CLOUDFLARE_ACCOUNT_ID.
     """
+    if provider_name == "local":
+        return True
+    if provider_name == "cloudflare":
+        acc_id = os.environ.get("CLOUDFLARE_ACCOUNT_ID", "").strip()
+        if not acc_id or len(acc_id) < 5 or any(m in acc_id.lower() for m in ("your", "here", "xxxx", "changeme")):
+            return False
     if not key:
         return False
     k = key.strip()
@@ -98,6 +142,17 @@ def is_valid_api_key(key: Optional[str]) -> bool:
         if marker in kl:
             return False
     return True
+
+
+def get_provider_base_url(provider_name: str) -> str:
+    """Resolve base URL for provider, including dynamic templating for cloudflare and local."""
+    cfg = PROVIDER_CONFIGS.get(provider_name, {})
+    if provider_name == "cloudflare":
+        acc_id = os.environ.get(cfg.get("env_account_id", "CLOUDFLARE_ACCOUNT_ID"), "").strip()
+        return cfg.get("base_url_template", "").format(account_id=acc_id)
+    elif provider_name == "local":
+        return os.environ.get(cfg.get("env_url", "LOCAL_LLM_URL"), cfg.get("default_url", "http://127.0.0.1:11434/v1")).strip()
+    return cfg.get("base_url", "")
 
 
 def get_provider_models(provider_name: str) -> list[str]:
@@ -150,7 +205,7 @@ class ProviderRegistry:
         if not cfg:
             return False
         api_key = os.environ.get(cfg["env_key"], "")
-        if not is_valid_api_key(api_key):
+        if not is_valid_api_key(api_key, provider_name=name):
             return False
 
         with self._lock:
@@ -233,11 +288,15 @@ class ProviderRegistry:
         """Returns provider status summary with model IDs and status words for admin command."""
         now = time.time()
         summary = {}
+        intent_p = get_intent_providers()
+        study_p = get_study_providers()
+        stt_p = get_stt_providers()
+
         with self._lock:
             for name, cfg in PROVIDER_CONFIGS.items():
                 raw_key = os.environ.get(cfg["env_key"], "")
                 state = self._states.get(name, ProviderState(name=name))
-                if not is_valid_api_key(raw_key):
+                if not is_valid_api_key(raw_key, provider_name=name):
                     status = "no key"
                 elif state.status_override:
                     status = state.status_override
@@ -255,11 +314,28 @@ class ProviderRegistry:
                 models = get_provider_models(name)
                 active = state.active_model or (models[0] if models else "none")
 
+                # Window usage percentages
+                usage = limiter.get_window_usage(name, active)
+
+                # Chains this provider belongs to
+                chains = []
+                if name in intent_p:
+                    chains.append("intent")
+                if name in study_p:
+                    chains.append("study")
+                if name in stt_p:
+                    chains.append("stt")
+
                 summary[name] = {
                     "status": status,
                     "model": active,
                     "calls_today": state.calls_today,
                     "last_error": state.last_error_class or "none",
+                    "rpm_pct": usage.get("rpm_pct"),
+                    "tpm_pct": usage.get("tpm_pct"),
+                    "rpd_pct": usage.get("rpd_pct"),
+                    "tpd_pct": usage.get("tpd_pct"),
+                    "chains": chains,
                 }
         return summary
 
@@ -300,6 +376,7 @@ def call_chat_completions(
     timeout: float = 6.0,
     temperature: float = 0.0,
     max_tokens: int = 800,
+    priority: str = "high",
 ) -> str:
     """
     Call OpenAI-compatible chat completions endpoint with requests.
@@ -311,7 +388,7 @@ def call_chat_completions(
         raise ValueError(f"Unknown provider: {provider_name}")
 
     api_key = os.environ.get(cfg["env_key"], "").strip()
-    if not is_valid_api_key(api_key):
+    if not is_valid_api_key(api_key, provider_name=provider_name):
         raise AuthError(f"Missing or invalid API key for {provider_name} in {cfg['env_key']}")
 
     all_models = get_provider_models(provider_name)
@@ -335,9 +412,10 @@ def call_chat_completions(
         registry.record_bad_model(provider_name, last_m, is_final=True)
         raise BadModelError(f"provider {provider_name}: model '{last_m}' not found.")
 
-    url = f"{cfg['base_url'].rstrip('/')}/chat/completions"
+    base_url = get_provider_base_url(provider_name)
+    url = f"{base_url.rstrip('/')}/chat/completions"
     headers = {
-        "Authorization": f"Bearer {api_key}",
+        "Authorization": f"Bearer {api_key or 'local'}",
         "Content-Type": "application/json",
         "User-Agent": "TaleemGo-AI/1.0",
     }
@@ -345,56 +423,39 @@ def call_chat_completions(
         headers["HTTP-Referer"] = "https://github.com/alinawazcode/Saathi"
         headers["X-Title"] = "TaleemGo AI"
 
-    for idx, model in enumerate(candidates):
-        is_last_model = (idx == len(candidates) - 1)
-        use_json_mode = json_mode and state.supports_json_mode
+    # Acquire concurrency slot (wait up to 8s for high priority, 2s for low)
+    acquired = limiter.acquire_concurrency(provider_name, priority=priority)
+    if not acquired:
+        registry.record_429(provider_name, retry_after=5.0)
+        raise RateLimitError(f"{provider_name} concurrency queue timeout")
 
-        payload = {
-            "model": model,
-            "messages": messages,
-            "temperature": temperature,
-            "max_tokens": max_tokens,
-        }
-        if provider_name == "gemini":
-            # Gemini OpenAI compatibility reasoning parameter
-            payload["reasoning_effort"] = "low"
-        if use_json_mode:
-            payload["response_format"] = {"type": "json_object"}
-
-        try:
-            r = requests.post(url, headers=headers, json=payload, timeout=timeout)
-        except requests.Timeout as e:
-            registry.record_5xx_or_network(provider_name, "Timeout")
-            raise ServerOrNetworkError(f"{provider_name} request timed out") from e
-        except requests.RequestException as e:
-            registry.record_5xx_or_network(provider_name, "ConnectionError")
-            raise ServerOrNetworkError(f"{provider_name} network connection error") from e
-
-        status = r.status_code
-
-        # 1. 401/403 Authentication Error
-        if status in (401, 403):
-            registry.record_auth_error(provider_name)
-            raise AuthError(f"Authentication failed for {provider_name} in {cfg['env_key']}")
-
-        # 2. Model not found / deprecated -> failover to next model
-        if _is_model_not_found(status, r.text):
-            state.bad_models.add(model)
-            if not is_last_model:
-                log.warning("Provider %s model '%s' failed (HTTP %d). Trying next model...", provider_name, model, status)
+    try:
+        skipped_models = 0
+        for idx, model in enumerate(candidates):
+            is_last_model = (idx == len(candidates) - 1)
+            est_tokens = limiter.estimate_tokens(messages, max_tokens=max_tokens)
+            if not limiter.can_call(provider_name, model, est_tokens):
+                skipped_models += 1
+                if is_last_model and skipped_models == len(candidates):
+                    raise RateLimitError(f"{provider_name} sliding window ceiling reached for all models")
                 continue
-            else:
-                registry.record_bad_model(provider_name, model, is_final=True)
-                raise BadModelError(f"provider {provider_name}: model '{model}' not found.")
 
-        # 3. HTTP 400 response_format error -> retry once without json mode
-        if use_json_mode and _is_json_mode_error(status, r.text):
-            state.supports_json_mode = False
-            log.warning("Provider %s does not support json_mode (HTTP %d). Retrying without json_mode...", provider_name, status)
-            payload.pop("response_format", None)
+            use_json_mode = json_mode and state.supports_json_mode
+
+            payload = {
+                "model": model,
+                "messages": messages,
+                "temperature": temperature,
+                "max_tokens": max_tokens,
+            }
+            if provider_name == "gemini":
+                # Gemini OpenAI compatibility reasoning parameter
+                payload["reasoning_effort"] = "low"
+            if use_json_mode:
+                payload["response_format"] = {"type": "json_object"}
+
             try:
                 r = requests.post(url, headers=headers, json=payload, timeout=timeout)
-                status = r.status_code
             except requests.Timeout as e:
                 registry.record_5xx_or_network(provider_name, "Timeout")
                 raise ServerOrNetworkError(f"{provider_name} request timed out") from e
@@ -402,62 +463,100 @@ def call_chat_completions(
                 registry.record_5xx_or_network(provider_name, "ConnectionError")
                 raise ServerOrNetworkError(f"{provider_name} network connection error") from e
 
-            if _is_model_not_found(status, r.text):
-                state.bad_models.add(model)
-                if not is_last_model:
-                    continue
-                registry.record_bad_model(provider_name, model, is_final=True)
-                raise BadModelError(f"provider {provider_name}: model '{model}' not found.")
+            status = r.status_code
 
+            # 1. 401/403 Authentication Error
             if status in (401, 403):
                 registry.record_auth_error(provider_name)
                 raise AuthError(f"Authentication failed for {provider_name} in {cfg['env_key']}")
 
-        # 4. 429 Rate limit
-        if status == 429:
-            retry_after = None
-            ra_header = r.headers.get("Retry-After")
-            if ra_header:
+            # 2. Model not found / deprecated -> failover to next model
+            if _is_model_not_found(status, r.text):
+                state.bad_models.add(model)
+                if not is_last_model:
+                    log.warning("Provider %s model '%s' failed (HTTP %d). Trying next model...", provider_name, model, status)
+                    continue
+                else:
+                    registry.record_bad_model(provider_name, model, is_final=True)
+                    raise BadModelError(f"provider {provider_name}: model '{model}' not found.")
+
+            # 3. HTTP 400 response_format error -> retry once without json mode
+            if use_json_mode and _is_json_mode_error(status, r.text):
+                state.supports_json_mode = False
+                log.warning("Provider %s does not support json_mode (HTTP %d). Retrying without json_mode...", provider_name, status)
+                payload.pop("response_format", None)
                 try:
-                    retry_after = float(ra_header)
-                except ValueError:
-                    pass
-            registry.record_429(provider_name, retry_after)
-            raise RateLimitError(f"{provider_name} rate limit exceeded", retry_after=retry_after)
+                    r = requests.post(url, headers=headers, json=payload, timeout=timeout)
+                    status = r.status_code
+                except requests.Timeout as e:
+                    registry.record_5xx_or_network(provider_name, "Timeout")
+                    raise ServerOrNetworkError(f"{provider_name} request timed out") from e
+                except requests.RequestException as e:
+                    registry.record_5xx_or_network(provider_name, "ConnectionError")
+                    raise ServerOrNetworkError(f"{provider_name} network connection error") from e
 
-        # 5. 5xx Server Error or 408 Request Timeout
-        if status >= 500 or status == 408:
-            registry.record_5xx_or_network(provider_name, f"HTTP{status}")
-            raise ServerOrNetworkError(f"{provider_name} server error HTTP {status}")
+                if _is_model_not_found(status, r.text):
+                    state.bad_models.add(model)
+                    if not is_last_model:
+                        continue
+                    registry.record_bad_model(provider_name, model, is_final=True)
+                    raise BadModelError(f"provider {provider_name}: model '{model}' not found.")
 
-        # 6. Other 4xx Client Error -> flat 60s cooldown (no doubling)
-        if status >= 400:
-            registry.record_client_error(provider_name, status)
-            raise ClientError(f"{provider_name} returned client error HTTP {status}")
+                if status in (401, 403):
+                    registry.record_auth_error(provider_name)
+                    raise AuthError(f"Authentication failed for {provider_name} in {cfg['env_key']}")
 
-        # 7. Success (HTTP 200)
-        try:
-            data = r.json()
-            content = data["choices"][0]["message"]["content"]
-            registry.record_success(provider_name, model=model)
-            usage = data.get("usage")
-            if usage:
-                log.info(
-                    "Provider %s [%s] usage: prompt=%s, completion=%s, total=%s",
-                    provider_name,
-                    model,
-                    usage.get("prompt_tokens"),
-                    usage.get("completion_tokens"),
-                    usage.get("total_tokens"),
-                )
-            return content
-        except Exception as e:
-            registry.record_5xx_or_network(provider_name, "InvalidResponseFormat")
-            raise ServerOrNetworkError(f"Malformed response payload from {provider_name}") from e
+            # 4. 429 Rate limit
+            if status == 429:
+                retry_after = None
+                ra_header = r.headers.get("Retry-After")
+                if ra_header:
+                    try:
+                        retry_after = float(ra_header)
+                    except ValueError:
+                        pass
+                registry.record_429(provider_name, retry_after)
+                limiter.record_usage(provider_name, model, 0, r.headers)
+                raise RateLimitError(f"{provider_name} rate limit exceeded", retry_after=retry_after)
 
-    last_m = candidates[-1] if candidates else "none"
-    registry.record_bad_model(provider_name, last_m, is_final=True)
-    raise BadModelError(f"provider {provider_name}: model '{last_m}' not found.")
+            # 5. 5xx Server Error or 408 Request Timeout
+            if status >= 500 or status == 408:
+                registry.record_5xx_or_network(provider_name, f"HTTP{status}")
+                raise ServerOrNetworkError(f"{provider_name} server error HTTP {status}")
+
+            # 6. Other 4xx Client Error -> flat 60s cooldown (no doubling)
+            if status >= 400:
+                registry.record_client_error(provider_name, status)
+                raise ClientError(f"{provider_name} returned client error HTTP {status}")
+
+            # 7. Success (HTTP 200)
+            try:
+                data = r.json()
+                content = data["choices"][0]["message"]["content"]
+                registry.record_success(provider_name, model=model)
+                usage = data.get("usage")
+                total_tokens = est_tokens
+                if usage:
+                    total_tokens = usage.get("total_tokens", est_tokens)
+                    log.info(
+                        "Provider %s [%s] usage: prompt=%s, completion=%s, total=%s",
+                        provider_name,
+                        model,
+                        usage.get("prompt_tokens"),
+                        usage.get("completion_tokens"),
+                        total_tokens,
+                    )
+                limiter.record_usage(provider_name, model, total_tokens, r.headers)
+                return content
+            except Exception as e:
+                registry.record_5xx_or_network(provider_name, "InvalidResponseFormat")
+                raise ServerOrNetworkError(f"Malformed response payload from {provider_name}") from e
+
+        last_m = candidates[-1] if candidates else "none"
+        registry.record_bad_model(provider_name, last_m, is_final=True)
+        raise BadModelError(f"provider {provider_name}: model '{last_m}' not found.")
+    finally:
+        limiter.release_concurrency(provider_name)
 
 
 def run_live_check(provider_name: str) -> tuple[str, str, float]:
@@ -475,7 +574,7 @@ def run_live_check(provider_name: str) -> tuple[str, str, float]:
     models = get_provider_models(provider_name)
     primary_model = models[0] if models else "none"
 
-    if not is_valid_api_key(raw_key):
+    if not is_valid_api_key(raw_key, provider_name=provider_name):
         return "no key", primary_model, 0.0
 
     start_t = time.time()

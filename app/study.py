@@ -13,9 +13,15 @@ from typing import Optional
 try:
     from .llm.providers import call_chat_completions, registry, LLMError
     from .llm.i18n import t
+    from .llm.capacity import limiter, get_study_providers
 except ImportError:
     from llm.providers import call_chat_completions, registry, LLMError
     from llm.i18n import t
+    from llm.capacity import limiter, get_study_providers
+
+class StudyBusyError(Exception):
+    """Raised when study helper requests are shed due to capacity pressure."""
+    pass
 
 log = logging.getLogger("taleemgo.study")
 
@@ -190,77 +196,71 @@ def call_study_provider(
     max_tokens: int = 800,
 ) -> tuple[Optional[str], Optional[str]]:
     """
-    Call LLM provider with fallback:
-    1. Try Gemini first (large context window) with full text.
-    2. Fall back to Groq with smaller text cut (STUDY_GROQ_MAX_CHARS) to respect 8k TPM limit.
-    Returns (raw_content, provider_name) or (None, None).
+    Call LLM provider for study features with fallback and load shedding:
+    1. Checks if all study providers are above 80% usage (RPM/TPM). If so, sheds request.
+    2. Tries configured STUDY_PROVIDERS in order with priority='low'.
+    Returns (raw_content, provider_name) or (None, None), or (None, "shed").
     NEVER logs prompt text or output content.
     """
-    # 1. Try Gemini
-    if registry.is_available("gemini"):
-        messages = [
-            {"role": "system", "content": prompt_system},
-            {"role": "user", "content": prompt_user_full},
-        ]
-        t0 = time.time()
-        try:
-            content = call_chat_completions(
-                provider_name="gemini",
-                messages=messages,
-                json_mode=json_mode,
-                timeout=25.0,
-                temperature=0.0,
-                max_tokens=max_tokens,
-            )
-            lat = time.time() - t0
-            registry.record_success("gemini")
-            log.info("[STUDY] gemini success latency=%.2fs json_mode=%s", lat, json_mode)
-            return content, "gemini"
-        except LLMError as e:
-            lat = time.time() - t0
-            log.warning("[STUDY] gemini failed in %.2fs: %s. Trying Groq fallback...", lat, type(e).__name__)
-        except Exception as e:
-            lat = time.time() - t0
-            log.warning("[STUDY] gemini unexpected error in %.2fs: %s. Trying Groq fallback...", lat, type(e).__name__)
+    study_providers = get_study_providers()
 
-    # 2. Try Groq fallback with smaller cut
-    if registry.is_available("groq"):
-        # If user payload contains the delimited document, cut the text inside the delimiters
-        groq_user = prompt_user_full
-        delim_start = "=== BEGIN UNTRUSTED LECTURE DOCUMENT:"
-        delim_end = "=== END UNTRUSTED LECTURE DOCUMENT ==="
-        if delim_start in prompt_user_full and delim_end in prompt_user_full:
-            pre, rest = prompt_user_full.split(delim_start, 1)
-            hdr_and_body, post = rest.split(delim_end, 1)
-            hdr, body = hdr_and_body.split("\n", 1) if "\n" in hdr_and_body else (hdr_and_body, "")
-            if len(body) > STUDY_GROQ_MAX_CHARS:
-                body = body[:STUDY_GROQ_MAX_CHARS] + "\n[Text truncated for size limit]"
-            groq_user = f"{pre}{delim_start}{hdr}\n{body}\n{delim_end}{post}"
+    # Load shedding: check if capacity pressure requires shedding low-priority study requests
+    if limiter.is_shedding(study_providers, registry=registry):
+        log.info("[STUDY] Load shedding active: study providers above 80% ceiling. Shedding request.")
+        return None, "shed"
+
+    for prov in study_providers:
+        if not registry.is_available(prov):
+            continue
+
+        user_content = prompt_user_full
+        # Truncate large documents if provider has smaller context or strict token ceilings
+        if prov in ("groq", "openrouter", "cerebras"):
+            delim_start = "=== BEGIN UNTRUSTED LECTURE DOCUMENT:"
+            delim_end = "=== END UNTRUSTED LECTURE DOCUMENT ==="
+            if delim_start in prompt_user_full and delim_end in prompt_user_full:
+                pre, rest = prompt_user_full.split(delim_start, 1)
+                hdr_and_body, post = rest.split(delim_end, 1)
+                hdr, body = hdr_and_body.split("\n", 1) if "\n" in hdr_and_body else (hdr_and_body, "")
+                if len(body) > STUDY_GROQ_MAX_CHARS:
+                    body = body[:STUDY_GROQ_MAX_CHARS] + "\n[Text truncated for size limit]"
+                user_content = f"{pre}{delim_start}{hdr}\n{body}\n{delim_end}{post}"
 
         messages = [
             {"role": "system", "content": prompt_system},
-            {"role": "user", "content": groq_user},
+            {"role": "user", "content": user_content},
         ]
         t0 = time.time()
         try:
-            content = call_chat_completions(
-                provider_name="groq",
-                messages=messages,
-                json_mode=json_mode,
-                timeout=20.0,
-                temperature=0.0,
-                max_tokens=max_tokens,
-            )
+            try:
+                content = call_chat_completions(
+                    provider_name=prov,
+                    messages=messages,
+                    json_mode=json_mode,
+                    timeout=25.0,
+                    temperature=0.0,
+                    max_tokens=max_tokens,
+                    priority="low",
+                )
+            except TypeError:
+                content = call_chat_completions(
+                    provider_name=prov,
+                    messages=messages,
+                    json_mode=json_mode,
+                    timeout=25.0,
+                    temperature=0.0,
+                    max_tokens=max_tokens,
+                )
             lat = time.time() - t0
-            registry.record_success("groq")
-            log.info("[STUDY] groq success latency=%.2fs json_mode=%s", lat, json_mode)
-            return content, "groq"
+            registry.record_success(prov)
+            log.info("[STUDY] %s success latency=%.2fs json_mode=%s", prov, lat, json_mode)
+            return content, prov
         except LLMError as e:
             lat = time.time() - t0
-            log.warning("[STUDY] groq fallback failed in %.2fs: %s", lat, type(e).__name__)
+            log.warning("[STUDY] %s failed in %.2fs: %s. Trying next provider...", prov, lat, type(e).__name__)
         except Exception as e:
             lat = time.time() - t0
-            log.warning("[STUDY] groq unexpected error in %.2fs: %s", lat, type(e).__name__)
+            log.warning("[STUDY] %s unexpected error in %.2fs: %s. Trying next provider...", prov, lat, type(e).__name__)
 
     return None, None
 
@@ -316,6 +316,8 @@ def generate_summary(
     )
 
     raw_output, provider = call_study_provider(system_prompt, user_payload, json_mode=False, max_tokens=600)
+    if provider == "shed":
+        raise StudyBusyError("Study helper is busy")
     if not raw_output:
         return None
 
@@ -372,6 +374,8 @@ def generate_quiz(
     )
 
     raw_output, provider = call_study_provider(system_prompt, user_payload, json_mode=True, max_tokens=1000)
+    if provider == "shed":
+        raise StudyBusyError("Study helper is busy")
     if not raw_output:
         return None
 

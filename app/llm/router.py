@@ -19,6 +19,7 @@ try:
         call_chat_completions,
         registry,
     )
+    from .capacity import get_intent_providers, intent_cache, record_intent_handled
 except ImportError:
     from llm.intent import build_system_prompt, build_user_payload, validate_intent_response
     from llm.providers import (
@@ -30,6 +31,7 @@ except ImportError:
         call_chat_completions,
         registry,
     )
+    from llm.capacity import get_intent_providers, intent_cache, record_intent_handled
 
 log = logging.getLogger("taleemgo.llm.router")
 
@@ -39,8 +41,7 @@ PER_REQUEST_TIMEOUT = 6.0
 
 
 def get_configured_providers() -> list[str]:
-    raw = os.environ.get("LLM_PROVIDERS", DEFAULT_PROVIDERS)
-    return [p.strip().lower() for p in raw.split(",") if p.strip()]
+    return get_intent_providers()
 
 
 def is_llm_enabled() -> bool:
@@ -70,9 +71,17 @@ def route_intent(
     """
     Query provider chain with fallback and 12s overall time budget.
     Returns validated intent dict or None if all providers fail.
+    Checks intent cache first for zero-provider response.
     """
     if not is_llm_enabled():
         return None
+
+    # Check intent cache (shared across users; 0 provider calls on hit)
+    cached = intent_cache.get(sanitized_text, has_pending_download, stored_lang)
+    if cached is not None:
+        log.info("[CACHE] Intent cache hit lang=%s pending=%s", stored_lang, has_pending_download)
+        record_intent_handled(is_rule_handled=False)
+        return cached
 
     providers = get_configured_providers()
     deadline = time.time() + TOTAL_TIME_BUDGET
@@ -120,12 +129,15 @@ def route_intent(
                     json_mode=True,
                     timeout=req_timeout,
                     temperature=0.0,
-                    max_tokens=800,
+                    max_tokens=150,
+                    priority="high",
                 )
                 latency = time.time() - start_t
 
                 parsed = _extract_json_block(raw_output)
                 validated = validate_intent_response(parsed, has_pending_download=has_pending_download)
+                intent_cache.put(sanitized_text, has_pending_download, stored_lang, validated)
+                record_intent_handled(is_rule_handled=False)
                 log.info("LLM success provider=%s latency=%.2fs off_topic=%s unsupported=%s",
                          prov, latency, validated.get("off_topic"), validated.get("unsupported"))
                 return validated
