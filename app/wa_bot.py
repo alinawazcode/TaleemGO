@@ -66,7 +66,7 @@ except ImportError:
         get_rules_first_stats = lambda: {}
         intent_cache = None
         is_exhibition_mode = lambda: False
-        record_intent_handled = lambda is_rule: None
+        record_intent_handled = lambda is_rule_handled: None
 
 try:
     from app.llm import stt
