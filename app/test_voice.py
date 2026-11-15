@@ -752,5 +752,96 @@ class TestAdminLLMStatusAndTestSTT(unittest.TestCase):
         self.assertIn("gemini-3.5-flash-lite", output)
 
 
+class TestVoiceDownloadFailureHandling(unittest.TestCase):
+    def test_download_failure_active_user_all_languages(self):
+        """Active user receives localized voice_download_failed message."""
+        import wa_bot
+        import users as usr
+        from llm.lang_data import STRINGS
+
+        for lang in ("en", "ur", "sd", "ur-roman"):
+            user_data = _active_user(lang=lang)
+            replies = []
+            with patch.object(usr, "get_user", return_value=user_data), \
+                 patch.object(wa_bot, "_reply", side_effect=lambda cid, txt: replies.append(txt)), \
+                 patch.object(usr, "is_llm_locked", return_value=False):
+                wa_bot.handle_audio_error(FAKE_CHAT)
+
+            self.assertEqual(len(replies), 1, f"Expected 1 reply for lang={lang}")
+            expected_msg = STRINGS[lang]["voice_download_failed"]
+            self.assertEqual(replies[0], expected_msg, f"Mismatch for lang={lang}")
+
+    def test_download_failure_unknown_user_ignored(self):
+        """Unknown user is silently ignored on download failure."""
+        import wa_bot
+        import users as usr
+
+        replies = []
+        with patch.object(usr, "get_user", return_value=None), \
+             patch.object(wa_bot, "_reply", side_effect=lambda cid, txt: replies.append(txt)):
+            wa_bot.handle_audio_error("unknown@c.us")
+
+        self.assertEqual(len(replies), 0)
+
+    def test_download_failure_signup_states_rejected(self):
+        """User in signup receives voice_signup_rejected line."""
+        import wa_bot
+        import users as usr
+        from llm.lang_data import STRINGS
+
+        for st in ("awaiting_email", "awaiting_password"):
+            user_data = {"chat_id": FAKE_CHAT, "status": st, "lang": "en", "is_admin": 0}
+            replies = []
+            with patch.object(usr, "get_user", return_value=user_data), \
+                 patch.object(wa_bot, "_reply", side_effect=lambda cid, txt: replies.append(txt)):
+                wa_bot.handle_audio_error(FAKE_CHAT)
+
+            self.assertEqual(len(replies), 1)
+            self.assertEqual(replies[0], STRINGS["en"]["voice_signup_rejected"])
+
+    def test_download_failure_locked_user_ignored(self):
+        """Locked-out user is silently ignored."""
+        import wa_bot
+        import users as usr
+
+        user_data = _active_user(lang="en")
+        replies = []
+        with patch.object(usr, "get_user", return_value=user_data), \
+             patch.object(usr, "is_llm_locked", return_value=True), \
+             patch.object(wa_bot, "_reply", side_effect=lambda cid, txt: replies.append(txt)):
+            wa_bot.handle_audio_error(FAKE_CHAT)
+
+        self.assertEqual(len(replies), 0)
+
+    def test_voice_download_failed_strings_present_and_clean(self):
+        """Ensure voice_download_failed exists in en, ur, sd, ur-roman and ur-roman has no Arabic script."""
+        import re
+        from llm.lang_data import STRINGS
+
+        for lang in ("en", "ur", "sd", "ur-roman"):
+            self.assertIn("voice_download_failed", STRINGS[lang])
+            self.assertTrue(len(STRINGS[lang]["voice_download_failed"]) > 0)
+
+        arabic_re = re.compile(r"[\u0600-\u06FF\u0750-\u077F\u08A0-\u08FF\uFB50-\uFDFF\uFE70-\uFEFF]")
+        ur_roman_str = STRINGS["ur-roman"]["voice_download_failed"]
+        self.assertIsNone(arabic_re.search(ur_roman_str), f"ur-roman contains Arabic characters: {ur_roman_str}")
+
+    def test_incoming_endpoint_with_audio_error(self):
+        """POST /incoming with audio_error dispatches to handle_audio_error."""
+        import wa_bot
+        from starlette.testclient import TestClient
+
+        client = TestClient(wa_bot.api)
+        with patch.object(wa_bot, "handle_audio_error") as mock_err:
+            resp = client.post(
+                "/incoming",
+                json={"chat_id": FAKE_CHAT, "audio_error": True},
+                headers={"x-token": wa_bot.TOKEN},
+            )
+            self.assertEqual(resp.status_code, 200)
+            self.assertEqual(resp.json(), {"ok": True})
+            mock_err.assert_called_once_with(FAKE_CHAT, False)
+
+
 if __name__ == "__main__":
     unittest.main()

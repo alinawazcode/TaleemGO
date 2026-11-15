@@ -275,22 +275,69 @@ if (require.main === module) {
         const VOICE_MAX_SECONDS = parseInt(process.env.VOICE_MAX_SECONDS || "30", 10);
         const VOICE_MAX_BYTES = parseInt(process.env.VOICE_MAX_BYTES || "2000000", 10);
         const durationSecs = msg.duration || 0;
+        const hasMedia = Boolean(msg.hasMedia);
         if (durationSecs > VOICE_MAX_SECONDS) {
           console.log(`[VOICE] ...${suffix} rejected: ${durationSecs}s > ${VOICE_MAX_SECONDS}s limit`);
           return;
         }
+
+        const logVoiceDownloadError = (attempt, err) => {
+          const errName = (err && err.name) || "Error";
+          const errMsg = (err && (typeof err.message === "string" ? err.message : String(err))) || "unknown";
+          const stackLines = ((err && err.stack) || "")
+            .split("\n")
+            .map((s) => s.trim())
+            .filter(Boolean)
+            .slice(0, 3)
+            .join(" | ");
+          console.error(
+            `[VOICE] downloadMedia attempt ${attempt} failed: name=${errName} msg=${errMsg} type=${msg.type} dur=${durationSecs} hasMedia=${hasMedia} stack=[${stackLines}]`
+          );
+        };
+
+        let media = null;
         try {
-          const media = await msg.downloadMedia();
-          if (!media || !media.data) return;
-          // Estimate raw bytes from base64 length
-          const rawBytes = Math.ceil(media.data.length * 3 / 4);
-          if (rawBytes > VOICE_MAX_BYTES) {
-            console.log(`[VOICE] ...${suffix} rejected: ~${rawBytes} bytes > ${VOICE_MAX_BYTES} limit`);
-            return;
+          media = await msg.downloadMedia();
+        } catch (err1) {
+          logVoiceDownloadError(1, err1);
+        }
+
+        // Retry once after 1.5 seconds if first attempt failed or returned no data
+        if (!media || !media.data) {
+          await new Promise((resolve) => setTimeout(resolve, 1500));
+          try {
+            media = await msg.downloadMedia();
+          } catch (err2) {
+            logVoiceDownloadError(2, err2);
           }
-          console.log(`[VOICE] ...${suffix} ${durationSecs}s ~${rawBytes}B`);
-          const payload = { chat_id, audio: { mime: media.mimetype, data_b64: media.data, seconds: durationSecs } };
-          if (is_self) payload.is_self = true;
+        }
+
+        if (!media || !media.data) {
+          console.error(`[VOICE] downloadMedia failed permanently for ...${suffix}`);
+          try {
+            const errPayload = { chat_id, audio_error: true };
+            if (is_self) errPayload.is_self = true;
+            await fetch(PY_URL, {
+              method: "POST",
+              headers: { "Content-Type": "application/json", "x-token": TOKEN },
+              body: JSON.stringify(errPayload),
+            });
+          } catch (fwdErr) {
+            console.error(`[VOICE] failed to report audio_error to Python: ${fwdErr.name || "Error"}`);
+          }
+          return;
+        }
+
+        // Estimate raw bytes from base64 length
+        const rawBytes = Math.ceil(media.data.length * 3 / 4);
+        if (rawBytes > VOICE_MAX_BYTES) {
+          console.log(`[VOICE] ...${suffix} rejected: ~${rawBytes} bytes > ${VOICE_MAX_BYTES} limit`);
+          return;
+        }
+        console.log(`[VOICE] ...${suffix} ${durationSecs}s ~${rawBytes}B`);
+        const payload = { chat_id, audio: { mime: media.mimetype, data_b64: media.data, seconds: durationSecs } };
+        if (is_self) payload.is_self = true;
+        try {
           const resp = await fetch(PY_URL, {
             method: "POST",
             headers: { "Content-Type": "application/json", "x-token": TOKEN },
@@ -298,7 +345,7 @@ if (require.main === module) {
           });
           if (!resp.ok) console.error(`[VOICE-FWD] Python error ${resp.status} for ...${suffix}`);
         } catch (e) {
-          console.error("[VOICE] download/forward failed:", e.message);
+          console.error("[VOICE] forward failed:", (e && e.name) || "Error");
         }
         return; // Don't fall through to text handler
       }
