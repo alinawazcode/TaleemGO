@@ -108,10 +108,10 @@ class TokenAwareLimiter:
 
     def get_ceilings(self, provider: str) -> dict:
         """Read ceilings from env vars with fallback to verified defaults."""
-        p = provider.lower()
-        prefix = p.upper()
+        base_p = provider.lower().split("#")[0]
+        prefix = base_p.upper()
 
-        defaults = DEFAULT_LIMITS.get(p, {})
+        defaults = DEFAULT_LIMITS.get(base_p, {})
         ceilings = {}
 
         for metric in ("rpm", "tpm", "rpd", "tpd"):
@@ -128,6 +128,30 @@ class TokenAwareLimiter:
 
         return ceilings
 
+    def _get_matching_providers(self, provider: str) -> list[str]:
+        p = provider.lower()
+        if p.endswith("#1"):
+            base = p.split("#")[0]
+            return [p, base]
+        elif "#" not in p:
+            return [p, f"{p}#1"]
+        return [p]
+
+    def get_key_recent_usage(self, key_instance: str) -> int:
+        """
+        Count total requests in the last 60s sliding window across all models for this key instance.
+        Used for fair rotation across multiple API keys of the same provider.
+        """
+        matching = set(self._get_matching_providers(key_instance))
+        now = time.time()
+        total_reqs = 0
+        with self._lock:
+            for (prov, model), w in self._windows.items():
+                if prov in matching:
+                    self._prune(w, now)
+                    total_reqs += sum(cnt for _, cnt in w["reqs_min"])
+        return total_reqs
+
     def estimate_tokens(self, messages: list[dict], max_tokens: int = 150) -> int:
         """Estimate tokens for a request: character length // 4 + max_tokens."""
         total_chars = sum(len(m.get("content", "") or "") for m in messages)
@@ -140,15 +164,28 @@ class TokenAwareLimiter:
         """
         ceilings = self.get_ceilings(provider)
         now = time.time()
+        matching = self._get_matching_providers(provider)
+        m_lower = model.lower()
 
         with self._lock:
-            w = self._get_window(provider, model)
-            self._prune(w, now)
+            cur_reqs = 0
+            cur_tokens = 0
+            cur_rpd = 0
+            cur_tpd = 0
+
+            for p in matching:
+                key = (p, m_lower)
+                if key in self._windows:
+                    w = self._windows[key]
+                    self._prune(w, now)
+                    cur_reqs += sum(cnt for _, cnt in w["reqs_min"])
+                    cur_tokens += sum(cnt for _, cnt in w["tokens_min"])
+                    cur_rpd += sum(cnt for _, cnt in w["reqs_day"])
+                    cur_tpd += sum(cnt for _, cnt in w["tokens_day"])
 
             # Check RPM
             rpm = ceilings.get("rpm")
             if rpm is not None:
-                cur_reqs = sum(cnt for _, cnt in w["reqs_min"])
                 if cur_reqs + 1 > rpm:
                     log.info("[LIMITER] Skipping %s/%s: RPM ceiling %d reached (%d reqs)", provider, model, rpm, cur_reqs)
                     return False
@@ -156,7 +193,6 @@ class TokenAwareLimiter:
             # Check TPM
             tpm = ceilings.get("tpm")
             if tpm is not None:
-                cur_tokens = sum(cnt for _, cnt in w["tokens_min"])
                 if cur_tokens + estimated_tokens > tpm:
                     log.info("[LIMITER] Skipping %s/%s: TPM ceiling %d reached (%d + %d tokens)", provider, model, tpm, cur_tokens, estimated_tokens)
                     return False
@@ -164,7 +200,6 @@ class TokenAwareLimiter:
             # Check RPD
             rpd = ceilings.get("rpd")
             if rpd is not None:
-                cur_rpd = sum(cnt for _, cnt in w["reqs_day"])
                 if cur_rpd + 1 > rpd:
                     log.info("[LIMITER] Skipping %s/%s: RPD ceiling %d reached (%d reqs)", provider, model, rpd, cur_rpd)
                     return False
@@ -172,7 +207,6 @@ class TokenAwareLimiter:
             # Check TPD
             tpd = ceilings.get("tpd")
             if tpd is not None:
-                cur_tpd = sum(cnt for _, cnt in w["tokens_day"])
                 if cur_tpd + estimated_tokens > tpd:
                     log.info("[LIMITER] Skipping %s/%s: TPD ceiling %d reached (%d + %d tokens)", provider, model, tpd, cur_tpd, estimated_tokens)
                     return False
@@ -201,7 +235,7 @@ class TokenAwareLimiter:
         # Check rate-limit headers if present (e.g. x-ratelimit-remaining-*)
         if headers:
             ra = headers.get("Retry-After") or headers.get("retry-after")
-            if ra:
+            if ra is not None and isinstance(ra, (str, int, float)):
                 try:
                     retry_sec = float(ra)
                     from app.llm.providers import registry
@@ -242,15 +276,24 @@ class TokenAwareLimiter:
         """Return percentage of window used for each ceiling (0..100%)."""
         ceilings = self.get_ceilings(provider)
         now = time.time()
+        matching = self._get_matching_providers(provider)
+        m_lower = model.lower()
 
         with self._lock:
-            w = self._get_window(provider, model)
-            self._prune(w, now)
+            cur_rpm = 0
+            cur_tpm = 0
+            cur_rpd = 0
+            cur_tpd = 0
 
-            cur_rpm = sum(cnt for _, cnt in w["reqs_min"])
-            cur_tpm = sum(cnt for _, cnt in w["tokens_min"])
-            cur_rpd = sum(cnt for _, cnt in w["reqs_day"])
-            cur_tpd = sum(cnt for _, cnt in w["tokens_day"])
+            for p in matching:
+                key = (p, m_lower)
+                if key in self._windows:
+                    w = self._windows[key]
+                    self._prune(w, now)
+                    cur_rpm += sum(cnt for _, cnt in w["reqs_min"])
+                    cur_tpm += sum(cnt for _, cnt in w["tokens_min"])
+                    cur_rpd += sum(cnt for _, cnt in w["reqs_day"])
+                    cur_tpd += sum(cnt for _, cnt in w["tokens_day"])
 
         def pct(cur, max_v):
             if max_v is None or max_v <= 0:
@@ -275,7 +318,7 @@ class TokenAwareLimiter:
     def is_shedding(self, providers: list[str], registry=None) -> bool:
         """
         Check if low-priority requests should be shed:
-        True when there is at least one available provider, but EVERY available provider in the list
+        True when there is at least one available provider, but EVERY available key instance in the list
         has > 80% usage on RPM or TPM.
         If no provider is available or configured, returns False so normal error handling applies.
         """
@@ -283,36 +326,50 @@ class TokenAwareLimiter:
             return False
 
         if registry is None:
-            from app.llm.providers import registry
-        from app.llm.providers import get_provider_models
+            try:
+                from .providers import registry
+            except ImportError:
+                from app.llm.providers import registry
 
-        available_providers_count = 0
-        any_provider_healthy = False
+        try:
+            from .providers import get_provider_models, get_provider_key_instances
+        except ImportError:
+            from app.llm.providers import get_provider_models, get_provider_key_instances
+
+        available_keys_count = 0
+        any_key_healthy = False
 
         for p in providers:
-            if not registry.is_available(p):
-                continue
-            available_providers_count += 1
+            instances = get_provider_key_instances(p)
+            if not instances:
+                instances = [f"{p}#1"]
             models = get_provider_models(p)
-            for m in models:
-                usage = self.get_window_usage(p, m)
+
+            for inst in instances:
+                if not registry.is_available(inst):
+                    continue
+                available_keys_count += 1
+                state = registry.get_state(inst)
+                active_model = state.active_model or (models[0] if models else "none")
+
+                usage = self.get_window_usage(inst, active_model)
                 rpm_p = usage["rpm_pct"]
                 tpm_p = usage["tpm_pct"]
 
-                # If unconstrained or under 80% capacity, provider is healthy
+                # If unconstrained or under 80% capacity, key is healthy
                 is_rpm_ok = (rpm_p is None) or (rpm_p < 80.0)
                 is_tpm_ok = (tpm_p is None) or (tpm_p < 80.0)
 
                 if is_rpm_ok and is_tpm_ok:
-                    any_provider_healthy = True
+                    any_key_healthy = True
                     break
-            if any_provider_healthy:
+            if any_key_healthy:
                 break
 
-        if available_providers_count == 0:
+        if available_keys_count == 0:
             return False
 
-        return not any_provider_healthy
+        return not any_key_healthy
 
 
 # Global limiter singleton
@@ -525,9 +582,12 @@ def get_stt_providers() -> list[str]:
 def generate_capacity_report() -> str:
     """
     Generate an exhibition capacity report:
-    Active chains, providers, verified models, ceilings, and estimated throughput.
+    Active chains, providers, configured keys, verified models, ceilings, and estimated throughput.
     """
-    from app.llm.providers import PROVIDER_CONFIGS, get_provider_models, registry
+    try:
+        from .providers import PROVIDER_CONFIGS, get_provider_models, get_provider_keys, registry
+    except ImportError:
+        from app.llm.providers import PROVIDER_CONFIGS, get_provider_models, get_provider_keys, registry
 
     intent_p = get_intent_providers()
     study_p = get_study_providers()
@@ -555,20 +615,25 @@ def generate_capacity_report() -> str:
     for p in all_providers:
         cfg = PROVIDER_CONFIGS.get(p, {})
         models = get_provider_models(p)
+        keys = get_provider_keys(p)
+        key_count = len(keys)
+        key_insts = [f"{p}#{i+1}" for i in range(key_count)] if key_count else [f"{p}#1 (none)"]
+
         ceilings = limiter.get_ceilings(p)
         rpm = ceilings.get("rpm", "unmetered")
         tpm = ceilings.get("tpm", "unmetered")
         rpd = ceilings.get("rpd", "unmetered")
         tpd = ceilings.get("tpd", "unmetered")
 
+        mult = max(1, key_count)
         if isinstance(rpm, int):
-            total_est_rpm += rpm
+            total_est_rpm += rpm * mult
         elif rpm == "unmetered":
-            total_est_rpm += 60
+            total_est_rpm += 60 * mult
 
         models_str = ", ".join(models) if models else "none"
-        lines.append(f"[{p.upper()}] Models: {models_str}")
-        lines.append(f"  Ceilings: RPM={rpm} | TPM={tpm} | RPD={rpd} | TPD={tpd}")
+        lines.append(f"[{p.upper()}] Keys: {key_count} ({', '.join(key_insts)}) | Models: {models_str}")
+        lines.append(f"  Ceilings (per key): RPM={rpm} | TPM={tpm} | RPD={rpd} | TPD={tpd}")
 
     lines.append("")
     lines.append(f"Estimated absorbable burst throughput: ~{total_est_rpm} reqs/min")

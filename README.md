@@ -253,6 +253,12 @@ At university exhibitions or high-traffic events, multiple students interact sim
 5. **Provider Concurrency Cap**: Caps concurrent in-flight requests per provider (`PROVIDER_CONCURRENCY=3`, default 3) with a priority queue (8s wait for high-priority intent/STT, 2s wait for study).
 6. **Load Shedding**: Under capacity pressure (> 80% ceiling usage across all study providers), low-priority study helper requests are shed immediately with a friendly localized message (`study_busy`), preserving all remaining capacity for critical intents and voice notes.
 7. **Exhibition Mode**: Set `EXHIBITION_MODE=1` to double cache TTL and log a full startup capacity and throughput report.
+8. **Multi-Key Failover & Fair Spreading**: Configure multiple API keys per provider via `GEMINI_API_KEYS=key1,key2,...` and `GROQ_API_KEYS=key1,key2,...` (the single `GEMINI_API_KEY` or `GROQ_API_KEY` remains key #1).
+   - *Terms of Service Note*: Use only keys from your own accounts and follow each provider's terms of service.
+   - Each key is treated as its own independent entry in the provider registry with independent cooldowns, bad-key isolation, and sliding window tracking (RPM/TPM/RPD/TPD).
+   - Requests rotate fairly across available keys based on the lowest usage count in the current 60s sliding window, preventing early key exhaustion.
+   - When a key encounters HTTP 429 or hits a window ceiling, the bot automatically fails over to the next key of the same provider with zero user disruption before falling back to the next provider.
+   - Raw keys are never logged; logs and admin outputs identify keys securely as `gemini#1`, `gemini#2`, `groq#1`, etc.
 
 Each message has a 12 second budget, with 6 seconds per request. When a model returns "not found", the bot moves to the next model in the list with no delay. When every provider fails, a student hits the hourly limit (`LLM_USER_LIMIT_PER_HOUR`, default 20), or `LLM_ENABLED=0`, the offline matcher in `app/llm/rules.py` handles the message.
 
@@ -372,7 +378,8 @@ To change the bot's WhatsApp number, stop the bridge, delete `whatsapp_bridge/.w
 | `STT_PROVIDERS` | `groq,gemini` | Ordered STT providers for voice transcription |
 | `PROVIDER_CONCURRENCY` | `3` | Max concurrent in-flight requests per provider |
 | `EXHIBITION_MODE` | `0` | Set to `1` for 2h cache TTL and startup capacity report |
-| `GEMINI_API_KEY`, `GROQ_API_KEY` | empty | Free keys. Optional: `MISTRAL_API_KEY`, `CLOUDFLARE_API_TOKEN`, `LOCAL_LLM_URL` |
+| `GEMINI_API_KEY`, `GROQ_API_KEY` | empty | Primary free keys (#1). Optional: `MISTRAL_API_KEY`, `CLOUDFLARE_API_TOKEN`, `LOCAL_LLM_URL` |
+| `GEMINI_API_KEYS`, `GROQ_API_KEYS` | empty | Comma-separated list of additional keys for fair failover (`gemini#2`, `groq#2`, etc.) |
 | `GEMINI_MODELS`, `GROQ_MODELS` | see above | Ordered model lists, comma separated |
 | `MISTRAL_MODELS` | `mistral-small-latest,open-mistral-7b` | Models for Mistral |
 | `CLOUDFLARE_MODELS` | `@cf/meta/llama-3.1-8b-instruct,...` | Models for Cloudflare Workers AI |
@@ -407,7 +414,7 @@ To change the bot's WhatsApp number, stop the bridge, delete `whatsapp_bridge/.w
 The unit tests run offline with fake providers and a fake LMS. Run them from the project folder:
 
 ```bash
-python -m unittest app/test_branding.py app/test_multiuser.py app/test_grades.py app/test_llm.py app/test_professional.py app/test_relogin.py app/test_helpers.py app/test_voice.py app/test_study.py app/test_capacity.py
+python -m unittest app/test_branding.py app/test_multiuser.py app/test_grades.py app/test_llm.py app/test_professional.py app/test_relogin.py app/test_helpers.py app/test_voice.py app/test_study.py app/test_capacity.py app/test_multikey.py
 ```
 
 | File | Covers |
@@ -422,6 +429,7 @@ python -m unittest app/test_branding.py app/test_multiuser.py app/test_grades.py
 | `test_voice.py` | Voice note transcription, audio gates, rate limits, STT failover, privacy |
 | `test_study.py` | Study helper: doc extraction (.txt/.pdf/.pptx/.docx), sanitization, prompt injection safety, rate limits, interactive quiz |
 | `test_capacity.py` | Capacity ceilings, sliding windows, concurrency queue, rules-first fast path, intent cache, load shedding |
+| `test_multikey.py` | Multi-key env parsing, fair key rotation, ordered failover, bad key isolation, admin llm key telemetry |
 
 The multi-user suite includes a bridge test, so run `npm install` in `whatsapp_bridge` first. `app/test_all.py` is a manual smoke test against a real LMS account and is not part of the unit suite.
 
