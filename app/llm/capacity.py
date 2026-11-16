@@ -250,7 +250,7 @@ class TokenAwareLimiter:
         Returns True if acquired, False on timeout.
         """
         cap = int(os.environ.get("PROVIDER_CONCURRENCY", "3"))
-        timeout = 8.0 if priority == "high" else 2.0
+        timeout = 3.0 if priority == "high" else 2.0
         deadline = time.time() + timeout
         p = provider.lower()
 
@@ -496,8 +496,11 @@ def can_run_rules_first(text: str, rule_res: Optional[dict], lms) -> bool:
 
     act = actions[0]
     intent = act.get("intent")
-    # Obvious exhibition intents handled rules-first with zero provider calls
-    if intent not in ("attendance", "grades", "calendar", "upcoming", "help"):
+    # Everyday intents handled rules-first with zero provider calls
+    if intent not in (
+        "attendance", "grades", "calendar", "upcoming", "help",
+        "assignments", "plan", "language", "resources"
+    ):
         return False
 
     if rule_res.get("unsupported") or rule_res.get("off_topic"):

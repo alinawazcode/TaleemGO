@@ -270,6 +270,14 @@ if (require.main === module) {
 
       const suffix = (chat_id || "").slice(-6);
 
+      // Trigger typing indicator immediately upon accepting message (Part A.6)
+      try {
+        const chat = await msg.getChat();
+        if (chat && typeof chat.sendStateTyping === "function") {
+          chat.sendStateTyping().catch(() => {});
+        }
+      } catch (e) { /* ignore */ }
+
       // Handle voice/audio messages (ptt = push-to-talk voice note, audio = audio file)
       if (msg.type === "ptt" || msg.type === "audio") {
         const VOICE_MAX_SECONDS = parseInt(process.env.VOICE_MAX_SECONDS || "30", 10);
@@ -379,7 +387,22 @@ if (require.main === module) {
     req.get("x-token") === TOKEN ? next() : res.status(401).json({ error: "bad token" })
   );
 
-  app.post("/send", async (req, res) => {
+  // Per-chat send queue: FIFO within each chat, fully concurrent across different chats
+  const chatSendQueues = new Map();
+
+  function enqueueChatSend(chat_id, sendFn) {
+    const prev = chatSendQueues.get(chat_id) || Promise.resolve();
+    const next = prev.catch(() => {}).then(sendFn);
+    chatSendQueues.set(chat_id, next);
+    next.finally(() => {
+      if (chatSendQueues.get(chat_id) === next) {
+        chatSendQueues.delete(chat_id);
+      }
+    });
+    return next;
+  }
+
+  app.post("/send", (req, res) => {
     if (!ready) return res.status(503).json({ error: "not ready" });
     const { chat_id, text } = req.body;
     if (!chat_id) return res.status(400).json({ error: "chat_id required" });
@@ -387,35 +410,41 @@ if (require.main === module) {
       console.log("[SEND] rejected empty text");
       return res.status(400).json({ error: "empty text" });
     }
-    try {
-      await client.sendMessage(chat_id, "🤖 " + text);
-      res.json({ ok: true });
-    } catch (e) {
-      console.error("[SEND ERROR]", e.message);
-      res.status(500).json({ error: e.message });
-      if (isFatalBrowserError(e.message)) {
-        console.error("[FATAL] browser page died, exiting for restart");
-        process.exit(1);
+
+    enqueueChatSend(chat_id, async () => {
+      try {
+        await client.sendMessage(chat_id, "🤖 " + text);
+        if (!res.headersSent) res.json({ ok: true });
+      } catch (e) {
+        console.error("[SEND ERROR]", e.message);
+        if (!res.headersSent) res.status(500).json({ error: e.message });
+        if (isFatalBrowserError(e.message)) {
+          console.error("[FATAL] browser page died, exiting for restart");
+          process.exit(1);
+        }
       }
-    }
+    });
   });
 
-  app.post("/send-file", async (req, res) => {
+  app.post("/send-file", (req, res) => {
     if (!ready) return res.status(503).json({ error: "not ready" });
     const { chat_id, path: filePath, caption } = req.body;
     if (!chat_id) return res.status(400).json({ error: "chat_id required" });
-    try {
-      const media = MessageMedia.fromFilePath(filePath);
-      await sendMediaRobust(chat_id, media, "🤖 " + (caption || ""));
-      res.json({ ok: true });
-    } catch (e) {
-      console.error("[SEND-FILE ERROR]", e.message);
-      res.status(500).json({ error: e.message });
-      if (isFatalBrowserError(e.message)) {
-        console.error("[FATAL] browser page died, exiting for restart");
-        process.exit(1);
+
+    enqueueChatSend(chat_id, async () => {
+      try {
+        const media = MessageMedia.fromFilePath(filePath);
+        await sendMediaRobust(chat_id, media, "🤖 " + (caption || ""));
+        if (!res.headersSent) res.json({ ok: true });
+      } catch (e) {
+        console.error("[SEND-FILE ERROR]", e.message);
+        if (!res.headersSent) res.status(500).json({ error: e.message });
+        if (isFatalBrowserError(e.message)) {
+          console.error("[FATAL] browser page died, exiting for restart");
+          process.exit(1);
+        }
       }
-    }
+    });
   });
 
   app.get("/health", (_req, res) => {

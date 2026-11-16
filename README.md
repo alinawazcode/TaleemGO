@@ -183,15 +183,16 @@ Typed commands always work, with or without the AI.
 | Command | What it does |
 |---|---|
 | `courses` | Lists your enrolled courses |
-| `assignments` | All assignments with status: submitted, pending, overdue |
-| `upcoming` | Pending assignments with deadlines |
+| `assignments [course \| pending \| overdue \| submitted \| all]` | Clean overview by default (counts per course & top 10 soonest items). Or filter by course and status |
+| `upcoming [course]` | Pending assignments with future due dates, ordered ascending |
 | `grades [course]` | Assignment marks as `8/10`, a running total, and teacher feedback |
-| `plan [course] [target]` | Attendance planner: how many classes you can miss or must attend for target% (default 75%), or `plan <course> miss N` |
+| `plan [course] [target%] [left N \| miss N]` | Attendance planner: how many classes you can miss or must attend for target% (default 75%), or `plan AI 80 left 3` |
 | `digest [on [HH:MM] \| off]` | Opt-in daily digest of deadlines, low attendance alerts, new lectures and grades |
 | `calendar` | Downloads an `.ics` file with upcoming assignment deadlines and 1-day alarms for Google/Apple Calendar |
+| `language [english \| urdu \| roman \| sindhi]` | View or lock language mode (1. English, 2. Urdu, 3. Roman Urdu, 4. Sindhi) |
 | `summarize <course> [week N \| title \| latest]` | Summarizes lecture document into key bullet points and terms |
 | `quiz <course> [week N \| title \| latest] [n]` | Interactive multiple-choice quiz (3-10 questions, default 5) |
-| `attendance [course]` | Overall attendance, or one course. Courses under `ATTENDANCE_WARN` (default 75%) get a warning mark |
+| `attendance [course] [refresh]` | Overall attendance, or one course. Add `refresh` to bypass cache |
 | `resources <course>` | Lecture files grouped by week |
 | `clos <course>` | Course learning outcomes |
 | `download <course> [week N or title]` | Sends a lecture file. Add `latest` for the newest one |
@@ -259,6 +260,9 @@ At university exhibitions or high-traffic events, multiple students interact sim
    - Requests rotate fairly across available keys based on the lowest usage count in the current 60s sliding window, preventing early key exhaustion.
    - When a key encounters HTTP 429 or hits a window ceiling, the bot automatically fails over to the next key of the same provider with zero user disruption before falling back to the next provider.
    - Raw keys are never logged; logs and admin outputs identify keys securely as `gemini#1`, `gemini#2`, `groq#1`, etc.
+9. **Short-Lived LMS Read Cache**: Responses for courses, assignments, and submissions are cached in-memory per user for `LMS_CACHE_TTL_SECONDS=60` (doubled to 120s when `EXHIBITION_MODE=1`). Write operations, logins, logouts, and background monitor runs invalidate the cache immediately. Students can explicitly bypass the cache at any time using `refresh` / `taza` / `تازہ` (e.g. `attendance refresh`).
+10. **Parallel Sub-Requests & Concurrency**: Heavy operations like `get_attendance()` and `get_assignments_with_status()` execute independent sub-queries concurrently via worker threads. AnyIO worker thread limit is configured to `WORKER_THREADS=100` on startup.
+11. **Hard Time Budgets & Progress Reassurance**: LLM intent resolution times out within `INTENT_TIMEOUT_SECONDS=6` falling back to rules immediately. If request processing exceeds 8 seconds, the bot sends a localised reassurance ("Still working on that, just a moment...") without abandoning the request.
 
 Each message has a 12 second budget, with 6 seconds per request. When a model returns "not found", the bot moves to the next model in the list with no delay. When every provider fails, a student hits the hourly limit (`LLM_USER_LIMIT_PER_HOUR`, default 20), or `LLM_ENABLED=0`, the offline matcher in `app/llm/rules.py` handles the message.
 
@@ -272,7 +276,8 @@ Registered students can send WhatsApp voice notes instead of typing. The bot tra
 
 - **Audio privacy**: Voice notes are processed purely in-memory as base64 bytes, never written to disk, and never stored. The transcript is never logged. Only audio duration, latency, and provider name appear in server logs.
 - **Transcripts**: The bot's reply begins with `🎤 I heard: "..."` so the student can verify what was heard.
-- **Languages supported**: Urdu, Sindhi, and English.
+- **Languages supported**: Urdu, Sindhi, and English. The user's locked language mode is passed directly to the STT engine as a biasing hint. If the detected script does not match the expected language mode, the system automatically retries with the next provider. Transcripts with fewer than 2 characters prompt the student to speak slowly or type.
+- **Sindhi STT accuracy**: Note that free speech-to-text models have lower accuracy for Sindhi than Urdu or English. Students are encouraged to check the `I heard: ...` confirmation line.
 - **Safety gates**: Voice notes are accepted only from registered, active, non-locked students. Voice notes sent during sign-up (`awaiting_email` or `awaiting_password`) are rejected with an explicit prompt to type credentials, and the audio is discarded immediately without calling any external service. Unknown numbers are silently ignored.
 - **Rate limits & thresholds**: Voice notes have a limit of 30 seconds (`VOICE_MAX_SECONDS=30`), ~2 MB raw audio (`VOICE_MAX_BYTES=2000000`), and 10 voice requests per hour per user (`VOICE_LIMIT_PER_HOUR=10`).
 - **STT providers**: Groq Whisper (`whisper-large-v3-turbo`, `whisper-large-v3`) with automatic fallback to Gemini (`gemini-3.5-flash-lite`, `gemini-3.8-flash`, `gemini-3.6-flash`). Configured via `STT_PROVIDERS=groq,gemini`.

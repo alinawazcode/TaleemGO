@@ -367,6 +367,7 @@ def match_rules(text: str, has_pending_download: bool = False, stored_lang: str 
 
     plan_miss_num = None
     plan_tgt_num = None
+    plan_left_num = None
     if has_plan_keyword():
         m_miss = (
             re.search(r"\b(?:miss|bunk|chhutti)\s*(\d+)\b", norm_lower)
@@ -378,6 +379,16 @@ def match_rules(text: str, has_pending_download: bool = False, stored_lang: str 
                 plan_miss_num = int(m_miss.group(1))
             except Exception:
                 pass
+        m_left = (
+            re.search(r"\b(?:left|remaining|bache|bache\s*hain|baqi|baki)\s*(\d+)\b", norm_lower)
+            or re.search(r"\b(\d+)\s*(?:left|remaining|bache\s*hain|bache|classes\s*left|classes\s*remaining)\b", norm_lower)
+            or re.search(r"(\d+)\s*(?:باقی|بچي|رہ\s*گئی)", folded_lower)
+        )
+        if m_left:
+            try:
+                plan_left_num = int(m_left.group(1))
+            except Exception:
+                pass
         m_tgt = (
             re.search(r"\b(?:target|hadd)\s*(\d+)\b", norm_lower)
             or re.search(r"\b(\d+)\s*%", norm_lower)
@@ -387,6 +398,14 @@ def match_rules(text: str, has_pending_download: bool = False, stored_lang: str 
                 plan_tgt_num = int(m_tgt.group(1))
             except Exception:
                 pass
+        if plan_tgt_num is None:
+            for num_str in re.findall(r"\b(\d{1,2})\b", norm_lower):
+                val = int(num_str)
+                if val == plan_miss_num or val == plan_left_num:
+                    continue
+                if 1 <= val <= 99:
+                    plan_tgt_num = val
+                    break
 
     digest_enable = None
     digest_time_str = None
@@ -418,7 +437,43 @@ def match_rules(text: str, has_pending_download: bool = False, stored_lang: str 
             except Exception:
                 pass
 
-    if has_summarize_keyword():
+    lang_mode = None
+    def has_language_keyword():
+        lang_kws = KEYWORDS.get("language", [])
+        for kw in lang_kws:
+            if re.match(r"^[a-zA-Z]+$", kw):
+                if re.search(r"\b" + re.escape(kw.lower()) + r"\b", norm_lower):
+                    return True
+            else:
+                folded_kw = fold_arabic_script(kw).lower()
+                if folded_kw in folded_lower or kw.lower() in norm_lower:
+                    return True
+        return False
+
+    if has_language_keyword():
+        if re.search(r"\b(?:english|en|1|انگريزي|انگریزی)\b", norm_lower) or any(w in folded_lower for w in ("انگريزي", "انگریزی")):
+            lang_mode = "english"
+        elif re.search(r"\b(?:roman|roman\s*urdu|ur-roman|3)\b", norm_lower):
+            lang_mode = "roman"
+        elif re.search(r"\b(?:urdu|ur|2|اردو)\b", norm_lower) or "اردو" in folded_lower:
+            lang_mode = "urdu"
+        elif re.search(r"\b(?:sindhi|sd|4|سنڌي)\b", norm_lower) or "سنڌي" in folded_lower:
+            lang_mode = "sindhi"
+
+    assignment_status = None
+    if has_keyword(KEYWORDS["assignments"]) or has_keyword(KEYWORDS["upcoming"]):
+        if re.search(r"\b(?:pending|baqi|baki)\b", norm_lower) or any(w in folded_lower for w in ("باقی", "باقي")):
+            assignment_status = "pending"
+        elif re.search(r"\b(?:overdue|late|qaza)\b", norm_lower) or any(w in folded_lower for w in ("دیر", "لیٹ")):
+            assignment_status = "overdue"
+        elif re.search(r"\b(?:submitted|done|jama)\b", norm_lower) or any(w in folded_lower for w in ("جمع", "مکمل")):
+            assignment_status = "submitted"
+        elif re.search(r"\b(?:all|sab|tamam)\b", norm_lower) or any(w in folded_lower for w in ("تمام", "سب")):
+            assignment_status = "all"
+
+    if has_language_keyword():
+        matched_intent = "language"
+    elif has_summarize_keyword():
         matched_intent = "summarize"
     elif has_quiz_keyword():
         matched_intent = "quiz"
@@ -453,7 +508,7 @@ def match_rules(text: str, has_pending_download: bool = False, stored_lang: str 
 
     # 4. Extract course_query candidates
     course_query = None
-    if matched_intent in ("attendance", "download", "resources", "clos", "grades", "courses", "plan", "summarize", "quiz"):
+    if matched_intent in ("attendance", "download", "resources", "clos", "grades", "courses", "plan", "summarize", "quiz", "assignments", "upcoming"):
         # Remove matched keywords, week digits, ordinals, and stop words
         tokens = re.findall(r"[A-Za-z0-9\u0600-\u06FF]+", clean_text)
         candidates = []
@@ -463,6 +518,7 @@ def match_rules(text: str, has_pending_download: bool = False, stored_lang: str 
         }
         kw_words = {w for kws in KEYWORDS.values() for kw in kws for w in kw.lower().split()}
         kw_words.update(number_words)
+        kw_words.update({"status", "pending", "overdue", "submitted", "all", "left", "remaining"})
         folded_kw_words = {fold_arabic_script(w) for w in kw_words}
 
         for t in tokens:
@@ -472,6 +528,7 @@ def match_rules(text: str, has_pending_download: bool = False, stored_lang: str 
                 (week_num is not None and int(tl) == week_num)
                 or (plan_miss_num is not None and int(tl) == plan_miss_num)
                 or (plan_tgt_num is not None and int(tl) == plan_tgt_num)
+                or (plan_left_num is not None and int(tl) == plan_left_num)
                 or (quiz_n is not None and int(tl) == quiz_n)
             ):
                 continue
@@ -507,11 +564,19 @@ def match_rules(text: str, has_pending_download: bool = False, stored_lang: str 
             action["target"] = plan_tgt_num
         if plan_miss_num is not None:
             action["miss"] = plan_miss_num
+        if plan_left_num is not None:
+            action["left"] = plan_left_num
     elif matched_intent == "digest":
         if digest_enable is not None:
             action["enable"] = digest_enable
         if digest_time_str is not None:
             action["time"] = digest_time_str
+    elif matched_intent == "language":
+        if lang_mode is not None:
+            action["mode"] = lang_mode
+    elif matched_intent in ("assignments", "upcoming"):
+        if assignment_status is not None:
+            action["status"] = assignment_status
 
     return {
         "lang": lang,

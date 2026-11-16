@@ -338,7 +338,13 @@ def _transcribe_gemini(audio_bytes: bytes, mime: str, seconds: float, lang_hint:
                                 }
                             },
                             {
-                                "text": f"Transcribe this audio message exactly as spoken. Return only the transcript text, nothing else.{lang_text}"
+                                # Domain prompt guidance (generic academic words only, verified 2026-11-16)
+                                # Docs: https://ai.google.dev/gemini-api/docs/audio
+                                "text": (
+                                    f"Transcribe this audio message verbatim.{lang_text} "
+                                    f"The speaker may discuss academic university topics like attendance, assignment, lecture, grades, quiz. "
+                                    f"Return only the exact transcribed text, nothing else."
+                                )
                             }
                         ]
                     }]
@@ -412,11 +418,36 @@ _PROVIDER_FUNCS = {
 }
 
 
+def is_script_mismatch(transcript: str, lang_mode: Optional[str]) -> bool:
+    """
+    Check if transcript script clearly mismatches the user's locked language mode.
+    - Urdu/Sindhi modes (ur, sd) expect Arabic/Perso-Arabic script.
+    - English/Roman Urdu (en, ur-roman) expect Latin script.
+    Returns True if there is a clear script mismatch.
+    """
+    if not transcript or not lang_mode:
+        return False
+    import re
+    has_arabic = bool(re.search(r"[\u0600-\u06FF]", transcript))
+    has_latin = bool(re.search(r"[a-zA-Z]", transcript))
+
+    if lang_mode in ("ur", "sd"):
+        # Expects Arabic/Perso-Arabic; if 0 Arabic chars and has Latin, clear mismatch
+        if not has_arabic and has_latin:
+            return True
+    elif lang_mode in ("en", "ur-roman"):
+        # Expects Latin; if has Arabic and 0 Latin, clear mismatch
+        if has_arabic and not has_latin:
+            return True
+    return False
+
+
 def transcribe(audio_b64: str, mime: str, seconds: float, lang_hint: Optional[str] = None) -> Optional[str]:
     """
     Transcribe audio (base64-encoded) using configured STT providers.
     Returns transcript string or None if all providers fail or return empty.
     Audio bytes are NEVER written to disk. Transcript is NEVER logged.
+    On clear script mismatch against locked lang_hint, attempts next provider once.
     """
     providers = _get_stt_providers()
     if not providers:
@@ -429,6 +460,7 @@ def transcribe(audio_b64: str, mime: str, seconds: float, lang_hint: Optional[st
         return None
 
     deadline = time.time() + TOTAL_STT_BUDGET
+    first_result = None
 
     for provider in providers:
         if time.time() >= deadline:
@@ -442,11 +474,16 @@ def transcribe(audio_b64: str, mime: str, seconds: float, lang_hint: Optional[st
         try:
             result = func(audio_bytes, mime, seconds, lang_hint)
             if result:
+                if is_script_mismatch(result, lang_hint):
+                    log.info("[STT] %s transcript script mismatch for lang=%s; checking next provider", provider, lang_hint)
+                    if first_result is None:
+                        first_result = result
+                    continue
                 return result
         except Exception as e:
             log.warning("[STT] provider %s raised %s", provider, type(e).__name__)
 
-    return None
+    return first_result
 
 
 def run_live_check(provider_name: str) -> tuple[str, str, float]:

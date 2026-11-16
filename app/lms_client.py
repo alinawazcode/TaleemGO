@@ -10,13 +10,17 @@ Optional:   LMS_EMAIL, LMS_PASSWORD (Telegram bot only)
 """
 
 import base64
+import concurrent.futures
+import inspect
 import json
 import os
 import re
 import socket
+import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Optional
 from urllib.parse import unquote, urlparse
 
 import requests
@@ -40,6 +44,13 @@ DEFAULT_DOWNLOAD_DIR = str(DATA_DIR / "downloads")
 REFRESH_MARGIN = 300
 MAX_DOWNLOAD_BYTES = 100 * 1024 * 1024              # 100 MB (WhatsApp doc limit)
 ALLOWED_EXTENSIONS = {".pdf", ".ppt", ".pptx", ".doc", ".docx", ".txt"}
+
+_timing_callback = None
+
+
+def set_timing_callback(cb):
+    global _timing_callback
+    _timing_callback = cb
 
 
 class LMSError(Exception):
@@ -95,8 +106,70 @@ class LMSClient:
         self.web = requests.Session()
         self.web.headers["User-Agent"] = "Mozilla/5.0"
 
+        # Per-user in-memory LMS read cache (TTL: LMS_CACHE_TTL_SECONDS, default 60s)
+        self._cache = {}
+        self._cache_lock = threading.Lock()
+        self.chat_id = None
+
         if load_tokens:
             self._load_tokens()
+
+    def _record_timing(self, ms: float):
+        if _timing_callback is not None:
+            cid = getattr(self, "chat_id", None)
+            try:
+                _timing_callback(cid, ms)
+            except Exception:
+                pass
+
+    # ---------- in-memory caching helpers ----------
+
+    @staticmethod
+    def _invoke(fn, *args, **kwargs):
+        try:
+            sig = inspect.signature(fn)
+            if "refresh" in kwargs and "refresh" not in sig.parameters:
+                kwargs.pop("refresh", None)
+            if "bypass" in kwargs and "bypass" not in sig.parameters:
+                kwargs.pop("bypass", None)
+        except Exception:
+            pass
+        return fn(*args, **kwargs)
+
+    def _ensure_cache(self):
+        if not hasattr(self, "_cache") or self._cache is None:
+            self._cache = {}
+        if not hasattr(self, "_cache_lock") or self._cache_lock is None:
+            self._cache_lock = threading.Lock()
+
+    def get_cached(self, key: str, bypass: bool = False):
+        if bypass:
+            return None
+        self._ensure_cache()
+        ttl = int(os.environ.get("LMS_CACHE_TTL_SECONDS", "60"))
+        if os.environ.get("EXHIBITION_MODE", "0").strip() in ("1", "true", "yes", "on"):
+            ttl *= 2
+        with self._cache_lock:
+            item = self._cache.get(key)
+            if item:
+                ts, val = item
+                if time.time() - ts < ttl:
+                    return val
+                self._cache.pop(key, None)
+        return None
+
+    def set_cached(self, key: str, val):
+        self._ensure_cache()
+        with self._cache_lock:
+            self._cache[key] = (time.time(), val)
+
+    def clear_cache(self, key: Optional[str] = None):
+        self._ensure_cache()
+        with self._cache_lock:
+            if key is None:
+                self._cache.clear()
+            else:
+                self._cache.pop(key, None)
 
     # ---------- encryption helpers ----------
 
@@ -132,6 +205,7 @@ class LMSClient:
 
     def _store(self, data):
         """Remember session, save to disk (encrypted if .enc), set web cookie."""
+        self.clear_cache()
         if "expires_at" not in data:
             data["expires_at"] = int(time.time()) + int(data.get("expires_in", 3600))
         self.session_data = data
@@ -160,6 +234,7 @@ class LMSClient:
             self.session_data = None
 
     def _auth_call(self, grant, body):
+        t0 = time.perf_counter()
         r = requests.post(
             f"{self.supabase_url}/auth/v1/token",
             params={"grant_type": grant},
@@ -167,6 +242,7 @@ class LMSClient:
             json=body,
             timeout=20,
         )
+        self._record_timing((time.perf_counter() - t0) * 1000)
         r.raise_for_status()
         return r.json()
 
@@ -206,6 +282,7 @@ class LMSClient:
     def _get(self, table, **params):
         for attempt in (1, 2):
             self.ensure_session()
+            t0 = time.perf_counter()
             r = requests.get(
                 f"{self.supabase_url}/rest/v1/{table}",
                 params=params,
@@ -213,6 +290,7 @@ class LMSClient:
                          "Authorization": f"Bearer {self.access_token}"},
                 timeout=20,
             )
+            self._record_timing((time.perf_counter() - t0) * 1000)
             if r.status_code == 401 and attempt == 1:
                 try:
                     self.refresh()
@@ -228,31 +306,59 @@ class LMSClient:
             r.raise_for_status()
             return r.json()
 
-    def get_courses(self):
+    def get_courses(self, refresh: bool = False):
+        cached = self.get_cached("courses", bypass=refresh)
+        if cached is not None:
+            return cached
         rows = self._get(
             "course_enrollments",
             select="course_id,courses(id,name,code,semester,year)",
             student_id=f"eq.{self.student_id}",
         )
-        return [r["courses"] for r in rows if r.get("courses")]
+        res = [r["courses"] for r in rows if r.get("courses")]
+        self.set_cached("courses", res)
+        return res
 
-    def get_assignments(self, course_id=None):
+    def get_assignments(self, course_id=None, refresh: bool = False):
+        ck = f"assignments:{course_id or 'all'}"
+        cached = self.get_cached(ck, bypass=refresh)
+        if cached is not None:
+            return cached
         params = {"select": "*", "order": "due_date.asc"}
         if course_id:
             params["course_id"] = f"eq.{course_id}"
-        return self._get("assignments", **params)
+        res = self._get("assignments", **params)
+        self.set_cached(ck, res)
+        return res
 
-    def get_resources(self, course_id=None):
+    def get_resources(self, course_id=None, refresh: bool = False):
+        ck = f"resources:{course_id or 'all'}"
+        cached = self.get_cached(ck, bypass=refresh)
+        if cached is not None:
+            return cached
         params = {"select": "*", "order": "created_at.desc"}
         if course_id:
             params["course_id"] = f"eq.{course_id}"
-        return self._get("resources", **params)
+        res = self._get("resources", **params)
+        self.set_cached(ck, res)
+        return res
 
-    def get_attendance(self):
-        sessions = self._get("attendance_sessions", select="id,course_id,title,date")
-        records = self._get("attendance_records",
-                            select="session_id,status",
-                            student_id=f"eq.{self.student_id}")
+    def get_attendance(self, refresh: bool = False):
+        cached = self.get_cached("attendance", bypass=refresh)
+        if cached is not None:
+            return cached
+
+        # Run independent calls in parallel
+        with concurrent.futures.ThreadPoolExecutor(max_workers=3) as executor:
+            fut_sess = executor.submit(self._get, "attendance_sessions", select="id,course_id,title,date")
+            fut_rec = executor.submit(
+                self._get, "attendance_records", select="session_id,status", student_id=f"eq.{self.student_id}"
+            )
+            fut_crs = executor.submit(self._invoke, self.get_courses, refresh=refresh)
+            sessions = fut_sess.result()
+            records = fut_rec.result()
+            courses_list = fut_crs.result()
+
         status_by_session = {r["session_id"]: r["status"] for r in records}
 
         def summarize(statuses):
@@ -268,24 +374,41 @@ class LMSClient:
 
         courses = {}
         all_statuses = []
-        for c in self.get_courses():
+        for c in courses_list:
             statuses = [status_by_session[s["id"]] for s in sessions
                         if s["course_id"] == c["id"] and s["id"] in status_by_session]
             courses[c["id"]] = summarize(statuses)
             all_statuses += statuses
-        return {"overall": summarize(all_statuses), "courses": courses}
+        res = {"overall": summarize(all_statuses), "courses": courses}
+        self.set_cached("attendance", res)
+        return res
 
-    def get_submissions(self):
+    def get_submissions(self, refresh: bool = False):
+        cached = self.get_cached("submissions", bypass=refresh)
+        if cached is not None:
+            return cached
         rows = self._get(
             "assignment_submissions",
             select="assignment_id,file_name,submitted_at,grade,graded_at,feedback",
             student_id=f"eq.{self.student_id}",
         )
-        return {r["assignment_id"]: r for r in rows}
+        res = {r["assignment_id"]: r for r in rows}
+        self.set_cached("submissions", res)
+        return res
 
-    def get_grades(self, course_id=None):
-        assignments = self.get_assignments(course_id)
-        submissions = self.get_submissions()
+    def get_grades(self, course_id=None, refresh: bool = False):
+        ck = f"grades:{course_id or 'all'}"
+        cached = self.get_cached(ck, bypass=refresh)
+        if cached is not None:
+            return cached
+
+        # Parallel fetch of assignments and submissions
+        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+            fut_a = executor.submit(self._invoke, self.get_assignments, course_id, refresh=refresh)
+            fut_s = executor.submit(self._invoke, self.get_submissions, refresh=refresh)
+            assignments = fut_a.result()
+            submissions = fut_s.result()
+
         out = []
         for a in assignments:
             sub = submissions.get(a["id"])
@@ -317,11 +440,22 @@ class LMSClient:
                 "feedback": sub.get("feedback") if sub else None,
                 "submitted": bool(sub),
             })
+        self.set_cached(ck, out)
         return out
 
-    def get_assignments_with_status(self, course_id=None):
-        assignments = self.get_assignments(course_id)
-        submissions = self.get_submissions()
+    def get_assignments_with_status(self, course_id=None, refresh: bool = False):
+        ck = f"assignments_status:{course_id or 'all'}"
+        cached = self.get_cached(ck, bypass=refresh)
+        if cached is not None:
+            return cached
+
+        # Parallel fetch of assignments and submissions
+        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+            fut_a = executor.submit(self._invoke, self.get_assignments, course_id, refresh=refresh)
+            fut_s = executor.submit(self._invoke, self.get_submissions, refresh=refresh)
+            assignments = fut_a.result()
+            submissions = fut_s.result()
+
         now = datetime.now(timezone.utc)
         out = []
         for a in assignments:
@@ -336,6 +470,7 @@ class LMSClient:
             else:
                 status = "pending"
             out.append({**a, "status": status, "submission": sub})
+        self.set_cached(ck, out)
         return out
 
     def get_attendance_records_detailed(self):
