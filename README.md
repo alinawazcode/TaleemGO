@@ -419,7 +419,7 @@ To change the bot's WhatsApp number, stop the bridge, delete `whatsapp_bridge/.w
 The unit tests run offline with fake providers and a fake LMS. Run them from the project folder:
 
 ```bash
-python -m unittest app/test_branding.py app/test_multiuser.py app/test_grades.py app/test_llm.py app/test_professional.py app/test_relogin.py app/test_helpers.py app/test_voice.py app/test_study.py app/test_capacity.py app/test_multikey.py
+python -m unittest app/test_branding.py app/test_multiuser.py app/test_grades.py app/test_llm.py app/test_professional.py app/test_relogin.py app/test_helpers.py app/test_voice.py app/test_study.py app/test_capacity.py app/test_multikey.py app/test_post_demo_fixes.py app/test_llm_400.py
 ```
 
 | File | Covers |
@@ -435,6 +435,8 @@ python -m unittest app/test_branding.py app/test_multiuser.py app/test_grades.py
 | `test_study.py` | Study helper: doc extraction (.txt/.pdf/.pptx/.docx), sanitization, prompt injection safety, rate limits, interactive quiz |
 | `test_capacity.py` | Capacity ceilings, sliding windows, concurrency queue, rules-first fast path, intent cache, load shedding |
 | `test_multikey.py` | Multi-key env parsing, fair key rotation, ordered failover, bad key isolation, admin llm key telemetry |
+| `test_post_demo_fixes.py` | Speed under load, language mode locking, per-course assignments, attendance remaining classes |
+| `test_llm_400.py` | No global cooldown on 400, minimal payload retry, unsupported param memory, safe error redaction, empty message rejection |
 
 The multi-user suite includes a bridge test, so run `npm install` in `whatsapp_bridge` first. `app/test_all.py` is a manual smoke test against a real LMS account and is not part of the unit suite.
 

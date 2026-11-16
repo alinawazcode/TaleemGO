@@ -650,6 +650,10 @@ STRINGS = {
         "plan_unlikely_warning": "⚠️ خبردار: لڳاتار {must_attend} وڌيڪ ڪلاسون وٺڻ عام سيمسٽر ۾ لڳ ڀڳ ناممڪن آهي.",
     },
     "ur-roman": {
+        "latest_caption": "Latest in {course}: Week {week} - {title}",
+        "latest_caption_no_week": "Latest in {course}: {title}",
+        "no_files": "No files found in {course}.",
+        "file_failed": "I couldn't send {filename}. Please try again.",
         "plan_heading": "Attendance Plan (Target: {target}%):",
         "plan_safe": "{course}: {pres}/{tot} ({pct}%) — Aap agli {can_miss} class(es) miss kar sakte hain aur {target}% ya us se ooper rahenge.",
         "plan_need": "{course}: {pres}/{tot} ({pct}%) — {target}% tak pohanchnay ke liye aapko musalsal agli {must_attend} class(es) attend karni hongi.",

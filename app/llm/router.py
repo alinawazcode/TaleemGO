@@ -17,7 +17,9 @@ try:
         RateLimitError,
         ServerOrNetworkError,
         call_chat_completions,
+        record_invalid_message,
         registry,
+        validate_chat_messages,
     )
     from .capacity import get_intent_providers, intent_cache, record_intent_handled
 except ImportError:
@@ -29,7 +31,9 @@ except ImportError:
         RateLimitError,
         ServerOrNetworkError,
         call_chat_completions,
+        record_invalid_message,
         registry,
+        validate_chat_messages,
     )
     from llm.capacity import get_intent_providers, intent_cache, record_intent_handled
 
@@ -77,6 +81,10 @@ def route_intent(
     if not is_llm_enabled():
         return None
 
+    if not sanitized_text or not sanitized_text.strip():
+        record_invalid_message()
+        return None
+
     # Check intent cache (shared across users; 0 provider calls on hit)
     cached = intent_cache.get(sanitized_text, has_pending_download, stored_lang)
     if cached is not None:
@@ -104,6 +112,10 @@ def route_intent(
         {"role": "system", "content": system_prompt},
         {"role": "user", "content": user_payload},
     ]
+
+    if not validate_chat_messages(messages):
+        record_invalid_message()
+        return None
 
     for prov in providers:
         time_left = deadline - time.time()
