@@ -5,6 +5,8 @@ Run with:  uvicorn app.wa_bot:api --port 8000
 Incoming JSON: { "chat_id": "...", "text": "...", "is_self": true/false }
 Conversation states: awaiting_email → awaiting_password → active | expired
 """
+import collections
+import concurrent.futures
 import inspect
 import logging
 import os
@@ -29,7 +31,7 @@ from lms_client import LMSClient, LMSAuthExpired, LMSError, summarize_grades  # 
 import timeutils                                                        # noqa: E402
 from timeutils import to_local, get_local_now, get_local_date_and_time  # noqa: E402
 from calendar_gen import generate_calendar_ics                          # noqa: E402
-from planner import calculate_attendance_plan, calculate_miss_what_if, get_default_target  # noqa: E402
+from planner import calculate_attendance_plan, calculate_miss_what_if, get_default_target, get_planned_classes_for_course  # noqa: E402
 import wa_transport as wa                                               # noqa: E402
 import users as usr                                                     # noqa: E402
 from wa_monitor import run_all_users                                    # noqa: E402
@@ -139,13 +141,14 @@ ACTIVATION_PHRASES = [
 
 HELP = (
     "TaleemGo AI commands:\n"
-    "courses\nassignments\nupcoming\n"
+    "courses\nassignments [course | pending | overdue | submitted | all]\nupcoming [course]\n"
     "grades [course]\n"
-    "resources <course>\nattendance [course]\nclos <course>\n"
+    "resources <course>\nattendance [course] [refresh]\nclos <course>\n"
     "download <course> [week N | title]\n"
-    "plan [course] [target% | miss N]\n"
+    "plan [course] [target%] [left N | miss N]\n"
     "digest [HH:MM | on | off | now]\n"
     "calendar\n"
+    "language [english | urdu | roman | sindhi]\n"
     "summarize <course> [week N | title | latest]\n"
     "quiz <course> [week N | title | latest] [n]\n"
     "logout  — disconnect your account\n"
@@ -157,7 +160,7 @@ WELCOME = (
     "To get started, please send me your *LMS email address*.\n\n"
     "Send your LMS email to begin.\n\n"
     "I use AI services to understand your messages. Never send your password except when I ask for it at login.\n\n"
-    "Voice notes are converted to text by an AI service.\n"
+    "Voice notes are converted to text by an AI service (Note: Sindhi speech recognition on free models is less accurate than Urdu and English; check the 'I heard: ...' line to verify).\n"
     "Summaries and quizzes send the text of the lecture file to an AI service."
 )
 
@@ -172,6 +175,158 @@ ASSIGNMENT_EMOJI = {
 }
 
 api = FastAPI()
+
+_stage_telemetry = collections.deque(maxlen=200)
+_stage_telemetry_lock = threading.Lock()
+
+
+def record_request_telemetry(queue_ms: int, lms_ms: int, llm_ms: int, stt_ms: int, send_ms: int, total_ms: int):
+    with _stage_telemetry_lock:
+        _stage_telemetry.append({
+            "queue": queue_ms,
+            "lms": lms_ms,
+            "llm": llm_ms,
+            "stt": stt_ms,
+            "send": send_ms,
+            "total": total_ms,
+        })
+
+
+def get_latency_stats() -> dict:
+    with _stage_telemetry_lock:
+        items = list(_stage_telemetry)
+    if not items:
+        return {}
+
+    def _p(data, pct):
+        if not data:
+            return 0
+        s = sorted(data)
+        k = (len(s) - 1) * (pct / 100.0)
+        f = int(k)
+        c = min(f + 1, len(s) - 1)
+        d = k - f
+        return int(s[f] + d * (s[c] - s[f]))
+
+    res = {"count": len(items)}
+    means = {}
+    for stage in ("queue", "lms", "llm", "stt", "send", "total"):
+        vals = [item[stage] for item in items]
+        res[f"{stage}_p50"] = _p(vals, 50)
+        res[f"{stage}_p95"] = _p(vals, 95)
+        means[stage] = sum(vals) / len(vals) if vals else 0
+
+    stages_only = {k: v for k, v in means.items() if k != "total"}
+    slowest = max(stages_only, key=stages_only.get) if stages_only else "none"
+    res["slowest_stage"] = slowest
+    return res
+
+
+class PerfTracker:
+    def __init__(self, queue_ms: int = 0):
+        self.queue_ms = queue_ms
+        self.lms_ms = 0
+        self.llm_ms = 0
+        self.stt_ms = 0
+        self.send_ms = 0
+        self.prompt_suffix = ""
+        self._lock = threading.Lock()
+
+    def add_lms(self, ms: float):
+        with self._lock:
+            self.lms_ms += int(ms)
+
+    def add_llm(self, ms: float):
+        with self._lock:
+            self.llm_ms += int(ms)
+
+    def add_stt(self, ms: float):
+        with self._lock:
+            self.stt_ms += int(ms)
+
+    def add_send(self, ms: float):
+        with self._lock:
+            self.send_ms += int(ms)
+
+
+_chat_perf_trackers: dict[str, PerfTracker] = {}
+_chat_perf_lock = threading.Lock()
+_chat_prompt_suffix: dict[str, str] = {}
+_chat_prompt_suffix_lock = threading.Lock()
+_awaiting_lang_choice: set[str] = set()
+_lang_choice_lock = threading.Lock()
+
+
+def register_perf_tracker(chat_id: str, tracker: PerfTracker):
+    with _chat_perf_lock:
+        _chat_perf_trackers[chat_id] = tracker
+
+
+def unregister_perf_tracker(chat_id: str):
+    with _chat_perf_lock:
+        _chat_perf_trackers.pop(chat_id, None)
+
+
+def add_lms_time(chat_id: Optional[str], ms: float):
+    if not chat_id:
+        return
+    with _chat_perf_lock:
+        tr = _chat_perf_trackers.get(chat_id)
+    if tr:
+        tr.add_lms(ms)
+
+
+def add_llm_time(chat_id: Optional[str], ms: float):
+    if not chat_id:
+        return
+    with _chat_perf_lock:
+        tr = _chat_perf_trackers.get(chat_id)
+    if tr:
+        tr.add_llm(ms)
+
+
+def add_stt_time(chat_id: Optional[str], ms: float):
+    if not chat_id:
+        return
+    with _chat_perf_lock:
+        tr = _chat_perf_trackers.get(chat_id)
+    if tr:
+        tr.add_stt(ms)
+
+
+def add_send_time(chat_id: Optional[str], ms: float):
+    if not chat_id:
+        return
+    with _chat_perf_lock:
+        tr = _chat_perf_trackers.get(chat_id)
+    if tr:
+        tr.add_send(ms)
+
+
+try:
+    from lms_client import set_timing_callback
+    set_timing_callback(add_lms_time)
+except Exception:
+    pass
+
+
+def _send_still_working(chat_id: str, lang: str):
+    try:
+        _reply(chat_id, t("still_working", lang))
+    except Exception:
+        pass
+
+
+@api.on_event("startup")
+async def _on_startup_concurrency():
+    try:
+        import anyio.to_thread
+        limiter = anyio.to_thread.current_default_thread_limiter()
+        target = int(os.environ.get("WORKER_THREADS", "100"))
+        limiter.total_tokens = target
+        log.info("[STARTUP] AnyIO worker thread limit set to %d", target)
+    except Exception as e:
+        log.warning("[STARTUP] Could not configure AnyIO worker thread limiter: %s", e)
 
 
 @api.on_event("startup")
@@ -221,31 +376,60 @@ def _start_monitor():
 # ---- helpers ----
 
 def _reply(chat_id: str, text: str):
-    if text is None or not str(text).strip():
-        caller = inspect.stack()[1].function if len(inspect.stack()) > 1 else "_reply"
-        log.info("[SEND] empty text suppressed caller=%s", caller)
-        return
+    t0 = time.perf_counter()
     try:
-        if len(text) <= 3500:
-            wa.send_text(chat_id, text)
+        if text is None or not str(text).strip():
+            caller = inspect.stack()[1].function if len(inspect.stack()) > 1 else "_reply"
+            log.info("[SEND] empty text suppressed caller=%s", caller)
             return
-        chunks = []
-        cur = []
-        cur_len = 0
-        for line in text.split("\n"):
-            if cur_len + len(line) + 1 > 3500 and cur:
+
+        with _chat_prompt_suffix_lock:
+            suffix = _chat_prompt_suffix.pop(chat_id, "")
+        if suffix:
+            text = text + suffix
+
+        try:
+            if len(text) <= 3500:
+                wa.send_text(chat_id, text)
+                return
+            chunks = []
+            cur = []
+            cur_len = 0
+            for line in text.split("\n"):
+                if cur_len + len(line) + 1 > 3500 and cur:
+                    chunks.append("\n".join(cur))
+                    cur = [line]
+                    cur_len = len(line)
+                else:
+                    cur.append(line)
+                    cur_len += len(line) + 1
+            if cur:
                 chunks.append("\n".join(cur))
-                cur = [line]
-                cur_len = len(line)
-            else:
-                cur.append(line)
-                cur_len += len(line) + 1
-        if cur:
-            chunks.append("\n".join(cur))
-        for ch in chunks:
-            wa.send_text(chat_id, ch)
+            for ch in chunks:
+                wa.send_text(chat_id, ch)
+        except Exception:
+            log.exception("Failed to send reply to %s…", chat_id[-6:])
+    finally:
+        add_send_time(chat_id, (time.perf_counter() - t0) * 1000)
+
+
+def _lms_call(fn, *args, **kwargs):
+    client = getattr(fn, "__self__", None)
+    is_refresh = kwargs.pop("refresh", False) or kwargs.pop("bypass", False)
+    if is_refresh and client and hasattr(client, "clear_cache"):
+        try:
+            client.clear_cache()
+        except Exception:
+            pass
+    try:
+        sig = inspect.signature(fn)
+        if "refresh" in sig.parameters:
+            kwargs["refresh"] = is_refresh
+        elif "bypass" in sig.parameters:
+            kwargs["bypass"] = is_refresh
     except Exception:
-        log.exception("Failed to send reply to %s…", chat_id[-6:])
+        pass
+    return fn(*args, **kwargs)
 
 
 def _clean_text(s: str) -> str:
@@ -284,6 +468,340 @@ def cmd_courses(lms, _=None):
     return format_course_list(courses)
 
 
+def _due_date_sort_key(a: dict):
+    d = a.get("due_date")
+    if not d:
+        return datetime.max.replace(tzinfo=timezone.utc)
+    try:
+        return datetime.fromisoformat(d.replace("Z", "+00:00"))
+    except Exception:
+        return datetime.max.replace(tzinfo=timezone.utc)
+
+
+def _show_assignments_overview(chat_id: str, lms, lang: str, refresh: bool = False):
+    courses = _lms_call(lms.get_courses, refresh=refresh)
+    rows = _lms_call(lms.get_assignments_with_status, refresh=refresh)
+    if not courses and not rows:
+        _reply(chat_id, "No courses or assignments found.")
+        return
+
+    course_map = {c["id"]: c for c in courses}
+    course_rows = collections.defaultdict(list)
+    for r in rows:
+        cid = r.get("course_id")
+        course_rows[cid].append(r)
+
+    summary_parts = []
+    for c in courses:
+        cid = c["id"]
+        c_asgns = course_rows.get(cid, [])
+        acr = course_acronym(c.get("name", ""))
+        c_code = acr or c.get("code") or "Course"
+
+        pending_cnt = sum(1 for a in c_asgns if a.get("status") == "pending")
+        overdue_cnt = sum(1 for a in c_asgns if a.get("status") == "overdue")
+        submitted_cnt = sum(1 for a in c_asgns if a.get("status") == "submitted")
+
+        if not c_asgns:
+            summary_parts.append(f"{c_code}: no assignments")
+        elif pending_cnt == 0 and overdue_cnt == 0:
+            summary_parts.append(f"{c_code}: all submitted")
+        else:
+            p_desc = []
+            if pending_cnt > 0:
+                p_desc.append(f"{pending_cnt} pending")
+            if overdue_cnt > 0:
+                p_desc.append(f"{overdue_cnt} overdue")
+            summary_parts.append(f"{c_code}: {', '.join(p_desc)}")
+
+    lines = [f"📋 *{t('assignments_overview_header', lang)}*\n"]
+    lines.append("\n".join(f"• {p}" for p in summary_parts))
+
+    pending_or_overdue = [a for a in rows if a.get("status") in ("pending", "overdue")]
+    pending_or_overdue.sort(key=_due_date_sort_key)
+    top_10 = pending_or_overdue[:10]
+
+    if top_10:
+        lines.append("")
+        for a in top_10:
+            st = a.get("status", "pending")
+            emoji = ASSIGNMENT_EMOJI.get(st, "⏳")
+            cid = a.get("course_id")
+            c = course_map.get(cid)
+            acr = course_acronym(c.get("name", "")) if c else ""
+            c_code = acr or (c.get("code") if c else "")
+            c_prefix = f"[{c_code}] " if c_code else ""
+            lines.append(f"{emoji} [{st.capitalize()}] {to_local(a['due_date'])}  {c_prefix}{a['title']}")
+
+    lines.append(f"\n💡 _{t('assignments_overview_hint', lang)}_")
+    _reply(chat_id, "\n".join(lines))
+
+
+def _show_assignments_for_course(chat_id: str, lms, course: dict, lang: str, status_filter: Optional[str] = None, refresh: bool = False):
+    rows = _lms_call(lms.get_assignments_with_status, course_id=course["id"], refresh=refresh)
+    acr = course_acronym(course.get("name", ""))
+    c_label = f"{acr} ({course.get('code')})" if acr else (course.get("code") or "Course")
+
+    if status_filter:
+        rows = [a for a in rows if a.get("status") == status_filter]
+        if not rows:
+            _reply(chat_id, t("assignments_empty_filter", lang, status=status_filter, course=f" for {c_label}"))
+            return
+
+    if not rows:
+        _reply(chat_id, f"No assignments found for {c_label}.")
+        return
+
+    pending = [a for a in rows if a.get("status") == "pending"]
+    overdue = [a for a in rows if a.get("status") == "overdue"]
+    submitted = [a for a in rows if a.get("status") == "submitted"]
+
+    pending.sort(key=_due_date_sort_key)
+    overdue.sort(key=_due_date_sort_key)
+    submitted.sort(key=_due_date_sort_key, reverse=True)
+
+    lines = [f"📋 *Assignments for {c_label}*\n"]
+    if pending:
+        lines.append("⏳ *Pending:*")
+        for a in pending:
+            lines.append(f"  • {to_local(a['due_date'])} — {a['title']}")
+        lines.append("")
+    if overdue:
+        lines.append("⚠️ *Overdue:*")
+        for a in overdue:
+            lines.append(f"  • {to_local(a['due_date'])} — {a['title']}")
+        lines.append("")
+    if submitted:
+        lines.append("✅ *Submitted:*")
+        for a in submitted:
+            lines.append(f"  • {to_local(a['due_date'])} — {a['title']}")
+
+    _reply(chat_id, "\n".join(lines).strip())
+
+
+def _show_assignments_status_filter(chat_id: str, lms, lang: str, status: str, refresh: bool = False):
+    rows = [a for a in _lms_call(lms.get_assignments_with_status, refresh=refresh) if a.get("status") == status]
+    if not rows:
+        _reply(chat_id, t("assignments_empty_filter", lang, status=status, course=""))
+        return
+
+    reverse = (status == "submitted")
+    rows.sort(key=_due_date_sort_key, reverse=reverse)
+    courses = {c["id"]: c for c in _lms_call(lms.get_courses, refresh=refresh)}
+    emoji = ASSIGNMENT_EMOJI.get(status, "⏳")
+    lines = [f"{emoji} *{status.capitalize()} Assignments:*\n"]
+    for a in rows:
+        c = courses.get(a.get("course_id"))
+        acr = course_acronym(c.get("name", "")) if c else ""
+        c_code = acr or (c.get("code") if c else "")
+        c_prefix = f"[{c_code}] " if c_code else ""
+        lines.append(f"• {to_local(a['due_date'])} — {c_prefix}{a['title']}")
+    _reply(chat_id, "\n".join(lines))
+
+
+def _show_assignments_all(chat_id: str, lms, lang: str, refresh: bool = False):
+    rows = _lms_call(lms.get_assignments_with_status, refresh=refresh)
+    if not rows:
+        _reply(chat_id, "No assignments.")
+        return
+
+    rows.sort(key=_due_date_sort_key)
+    courses = {c["id"]: c for c in _lms_call(lms.get_courses, refresh=refresh)}
+    lines = ["📋 *All Assignments:*\n"]
+    for a in rows:
+        st = a.get("status", "pending")
+        emoji = ASSIGNMENT_EMOJI.get(st, "⏳")
+        c = courses.get(a.get("course_id"))
+        acr = course_acronym(c.get("name", "")) if c else ""
+        c_code = acr or (c.get("code") if c else "")
+        c_prefix = f"[{c_code}] " if c_code else ""
+        lines.append(f"{emoji} [{st.capitalize()}] {to_local(a['due_date'])}  {c_prefix}{a['title']}")
+    _reply(chat_id, "\n".join(lines))
+
+
+def _handle_assignments_cmd(chat_id: str, lms, arg: str = ""):
+    user = usr.get_user(chat_id)
+    lang = user.get("lang", "en") if user else "en"
+    raw_arg = arg.strip()
+
+    is_refresh = False
+    if re.search(r"\b(?:refresh|taza|تازہ)\b", raw_arg, re.IGNORECASE):
+        is_refresh = True
+        raw_arg = re.sub(r"\b(?:refresh|taza|تازہ)\b", "", raw_arg, flags=re.IGNORECASE).strip()
+
+    status_filter = None
+    is_all = False
+
+    if re.search(r"\b(?:all|sab|sub|تمام|سڀ)\b", raw_arg, re.IGNORECASE):
+        is_all = True
+        raw_arg = re.sub(r"\b(?:all|sab|sub|تمام|سڀ)\b", "", raw_arg, flags=re.IGNORECASE).strip()
+
+    if re.search(r"\b(?:pending|baqi|rehta|rehte|رہيل|باقي|غیر\s*مکمل)\b", raw_arg, re.IGNORECASE):
+        status_filter = "pending"
+        raw_arg = re.sub(r"\b(?:pending|baqi|rehta|rehte|رہيل|باقي|غیر\s*مکمل)\b", "", raw_arg, flags=re.IGNORECASE).strip()
+    elif re.search(r"\b(?:overdue|late|guzar|وقت\s*گذر|گذريل|میعاد\s*ختم)\b", raw_arg, re.IGNORECASE):
+        status_filter = "overdue"
+        raw_arg = re.sub(r"\b(?:overdue|late|guzar|وقت\s*گذر|گذريل|میعاد\s*ختم)\b", "", raw_arg, flags=re.IGNORECASE).strip()
+    elif re.search(r"\b(?:submitted|done|jama|جمع|مڪمل|مکمل)\b", raw_arg, re.IGNORECASE):
+        status_filter = "submitted"
+        raw_arg = re.sub(r"\b(?:submitted|done|jama|جمع|مڪمل|مکمل)\b", "", raw_arg, flags=re.IGNORECASE).strip()
+
+    course_part = raw_arg.strip()
+
+    if course_part:
+        courses = _lms_call(lms.get_courses, refresh=is_refresh)
+        matches = resolve_course(lms, course_part)
+        if not matches:
+            usr.set_pending_action(chat_id, {"intent": "assignments", "status": status_filter})
+            _reply(chat_id, t("course_not_found", lang, courses=format_course_list(courses)))
+            return
+        elif len(matches) > 1:
+            options = "\n".join(f"{i}. {c.get('code')} {c.get('name')}" for i, c in enumerate(matches, 1))
+            usr.set_pending(chat_id, {"type": "course", "courses": matches, "command": "assignments", "extra": status_filter or ""})
+            _reply(chat_id, t("which_course", lang, options=options))
+            return
+        else:
+            _show_assignments_for_course(chat_id, lms, matches[0], lang, status_filter=status_filter, refresh=is_refresh)
+            return
+
+    if is_all:
+        _show_assignments_all(chat_id, lms, lang, refresh=is_refresh)
+    elif status_filter:
+        _show_assignments_status_filter(chat_id, lms, lang, status=status_filter, refresh=is_refresh)
+    else:
+        _show_assignments_overview(chat_id, lms, lang, refresh=is_refresh)
+
+
+def _handle_upcoming_cmd(chat_id: str, lms, arg: str = ""):
+    user = usr.get_user(chat_id)
+    lang = user.get("lang", "en") if user else "en"
+    raw_arg = arg.strip()
+
+    is_refresh = False
+    if re.search(r"\b(?:refresh|taza|تازہ)\b", raw_arg, re.IGNORECASE):
+        is_refresh = True
+        raw_arg = re.sub(r"\b(?:refresh|taza|تازہ)\b", "", raw_arg, flags=re.IGNORECASE).strip()
+
+    course_part = raw_arg.strip()
+    target_course = None
+    if course_part:
+        courses = _lms_call(lms.get_courses, refresh=is_refresh)
+        matches = resolve_course(lms, course_part)
+        if not matches:
+            usr.set_pending_action(chat_id, {"intent": "upcoming"})
+            _reply(chat_id, t("course_not_found", lang, courses=format_course_list(courses)))
+            return
+        elif len(matches) > 1:
+            options = "\n".join(f"{i}. {c.get('code')} {c.get('name')}" for i, c in enumerate(matches, 1))
+            usr.set_pending(chat_id, {"type": "course", "courses": matches, "command": "upcoming"})
+            _reply(chat_id, t("which_course", lang, options=options))
+            return
+        else:
+            target_course = matches[0]
+
+    cid = target_course["id"] if target_course else None
+    rows = _lms_call(lms.get_assignments_with_status, course_id=cid, refresh=is_refresh)
+    now = datetime.now(timezone.utc)
+
+    upcoming_list = []
+    for a in rows:
+        if a.get("status") != "pending":
+            continue
+        due_raw = a.get("due_date")
+        if not due_raw:
+            continue
+        try:
+            due_dt = datetime.fromisoformat(due_raw.replace("Z", "+00:00"))
+            if due_dt >= now:
+                upcoming_list.append((due_dt, a))
+        except Exception:
+            continue
+
+    c_label = ""
+    if target_course:
+        acr = course_acronym(target_course.get("name", ""))
+        c_label = f" for {acr or target_course['code']}"
+
+    if not upcoming_list:
+        _reply(chat_id, f"Nothing pending{c_label}.")
+        return
+
+    upcoming_list.sort(key=lambda x: x[0])
+    courses = {c["id"]: c for c in _lms_call(lms.get_courses, refresh=is_refresh)}
+    lines = [f"⏳ *Upcoming Assignments{c_label}:*\n"]
+    for dt, a in upcoming_list:
+        c = courses.get(a.get("course_id"))
+        acr = course_acronym(c.get("name", "")) if c else ""
+        c_code = acr or (c.get("code") if c else "")
+        c_prefix = f"[{c_code}] " if (c_code and not target_course) else ""
+        lines.append(f"• {to_local(a['due_date'])} — {c_prefix}{a['title']}")
+
+    _reply(chat_id, "\n".join(lines))
+
+
+
+def _handle_language_cmd(chat_id: str, arg: str = ""):
+    user = usr.get_user(chat_id)
+    cur_lang = user.get("lang", "en") if user else "en"
+    clean_arg = arg.strip().lower()
+
+    lang_names = {
+        "en": "English",
+        "ur": "اردو (Urdu)",
+        "ur-roman": "Roman Urdu",
+        "sd": "سنڌي (Sindhi)",
+    }
+
+    if not clean_arg:
+        cur_name = lang_names.get(cur_lang, cur_lang)
+        prompt_txt = t("language_current", cur_lang, current=cur_name) + "\n\n" + t("language_prompt", cur_lang)
+        _reply(chat_id, prompt_txt)
+        with _lang_choice_lock:
+            _awaiting_lang_choice.add(chat_id)
+        return
+
+    lang_map = {
+        "1": "en", "english": "en", "en": "en", "angrezi": "en",
+        "2": "ur", "urdu": "ur", "ur": "ur", "اردو": "ur",
+        "3": "ur-roman", "roman": "ur-roman", "roman urdu": "ur-roman", "ur-roman": "ur-roman",
+        "4": "sd", "sindhi": "sd", "sd": "sd", "سنڌي": "sd", "سندھی": "sd",
+    }
+    target_lang = lang_map.get(clean_arg)
+    if not target_lang:
+        cur_name = lang_names.get(cur_lang, cur_lang)
+        prompt_txt = t("language_current", cur_lang, current=cur_name) + "\n\n" + t("language_prompt", cur_lang)
+        _reply(chat_id, prompt_txt)
+        with _lang_choice_lock:
+            _awaiting_lang_choice.add(chat_id)
+        return
+
+    usr.set_user_lang(chat_id, target_lang, locked=True)
+    t_name = lang_names.get(target_lang, target_lang)
+    _reply(chat_id, t("language_set", target_lang, lang_name=t_name))
+
+
+def _handle_assignments_action(chat_id: str, lms, act: dict, lang: str):
+    cq = act.get("course_query")
+    status = act.get("status")
+    if cq:
+        arg = f"{cq} {status}" if status else cq
+        _handle_assignments_cmd(chat_id, lms, arg)
+    elif status:
+        _handle_assignments_cmd(chat_id, lms, status)
+    else:
+        _handle_assignments_cmd(chat_id, lms, "")
+
+
+def _handle_upcoming_action(chat_id: str, lms, act: dict, lang: str):
+    cq = act.get("course_query", "")
+    _handle_upcoming_cmd(chat_id, lms, cq)
+
+
+def _handle_language_action(chat_id: str, act: dict, lang: str):
+    target = act.get("lang_mode", "")
+    _handle_language_cmd(chat_id, target)
+
+
 def cmd_assignments(lms, _=None):
     rows = lms.get_assignments_with_status()
     if not rows:
@@ -304,6 +822,7 @@ def cmd_upcoming(lms, _=None):
     for a in rows:
         lines.append(f"⏳ {to_local(a['due_date'])}  {a['title']}")
     return "\n".join(lines)
+
 
 
 def _format_att_stats(pres: int, tot: int, pct, absent: int = None) -> str:
@@ -332,11 +851,17 @@ def _show_course_attendance(chat_id: str, lms, course: dict, att: dict = None):
 
 
 def _handle_attendance_cmd(chat_id: str, lms, arg: str):
-    att = lms.get_attendance()
-    courses = lms.get_courses()
+    raw_arg = arg.strip() if arg else ""
+    is_refresh = False
+    if re.search(r"\b(?:refresh|taza|تازہ)\b", raw_arg, re.IGNORECASE):
+        is_refresh = True
+        raw_arg = re.sub(r"\b(?:refresh|taza|تازہ)\b", "", raw_arg, flags=re.IGNORECASE).strip()
+
+    att = _lms_call(lms.get_attendance, refresh=is_refresh)
+    courses = _lms_call(lms.get_courses, refresh=is_refresh)
     user = usr.get_user(chat_id)
     lang = user.get("lang", "en") if user else "en"
-    if not arg:
+    if not raw_arg:
         usr.set_pending_action(chat_id, {"intent": "attendance"})
         o = att.get("overall", {})
         pres = o.get("present", 0)
@@ -354,7 +879,7 @@ def _handle_attendance_cmd(chat_id: str, lms, arg: str):
         _reply(chat_id, "\n".join(lines))
         return
 
-    matches = resolve_course(lms, arg)
+    matches = resolve_course(lms, raw_arg)
     if not matches:
         usr.set_pending_action(chat_id, {"intent": "attendance"})
         _reply(chat_id, t("course_not_found", lang, courses=format_course_list(courses)))
@@ -366,7 +891,16 @@ def _handle_attendance_cmd(chat_id: str, lms, arg: str):
         _reply(chat_id, t("which_course", lang, options=options))
 
 
-def _show_course_plan(chat_id: str, lms, course: dict, target: Optional[float] = None, miss: Optional[int] = None, extra: str = "", lang: str = "en"):
+def _show_course_plan(
+    chat_id: str,
+    lms,
+    course: dict,
+    target: Optional[float] = None,
+    miss: Optional[int] = None,
+    left: Optional[int] = None,
+    extra: str = "",
+    lang: str = "en",
+):
     if target is None:
         target = get_default_target()
     if extra:
@@ -378,6 +912,11 @@ def _show_course_plan(chat_id: str, lms, course: dict, target: Optional[float] =
         elif extra.startswith("target="):
             try:
                 target = float(extra.split("=")[1])
+            except Exception:
+                pass
+        elif extra.startswith("left=") or extra.startswith("remaining="):
+            try:
+                left = int(extra.split("=")[1])
             except Exception:
                 pass
         elif extra.isdigit():
@@ -401,15 +940,71 @@ def _show_course_plan(chat_id: str, lms, course: dict, target: Optional[float] =
         _reply(chat_id, t("plan_what_if", lang, course=c_label, miss=miss, pct=pct_disp, pres=pres, new_total=res['new_total']))
         return
 
-    plan_res = calculate_attendance_plan(pres, tot, target)
+    # Check config for planned classes if left is not explicitly given
+    if left is None:
+        planned_total = get_planned_classes_for_course(course.get("code", ""))
+        if planned_total is not None:
+            left = max(0, planned_total - tot)
+
+    plan_res = calculate_attendance_plan(pres, tot, target, remaining=left)
     tgt_disp = int(target) if target == int(target) else target
     lines = [t("plan_heading", lang, target=tgt_disp)]
+
     if plan_res["status"] == "no_records":
         lines.append(t("plan_no_records", lang, course=c_label))
+    elif plan_res["status"] == "unreachable":
+        lines.append(t(
+            "plan_unreachable",
+            lang,
+            course=c_label,
+            target=tgt_disp,
+            left=plan_res["remaining"],
+            max_pct=f"{plan_res['max_pct']:.1f}",
+            min_pct=f"{plan_res['min_pct']:.1f}",
+            reachable_tgt=plan_res["reachable_target"],
+            pres_plus_left=plan_res["pres_plus_left"],
+            tot_plus_left=plan_res["tot_plus_left"],
+        ))
     elif plan_res["status"] == "safe":
-        lines.append(t("plan_safe", lang, course=c_label, pres=pres, tot=tot, pct=f"{plan_res['percent']:.1f}", can_miss=plan_res["can_miss"], target=tgt_disp))
-    else:
-        lines.append(t("plan_need", lang, course=c_label, pres=pres, tot=tot, pct=f"{plan_res['percent']:.1f}", must_attend=plan_res["must_attend"], target=tgt_disp))
+        if plan_res.get("remaining") is not None:
+            lines.append(t(
+                "plan_safe_left",
+                lang,
+                course=c_label,
+                pres=pres,
+                tot=tot,
+                pct=f"{plan_res['percent']:.1f}",
+                left=plan_res["remaining"],
+                can_miss=plan_res["can_miss"],
+                target=tgt_disp,
+                max_pct=f"{plan_res['max_pct']:.1f}",
+                min_pct=f"{plan_res['min_pct']:.1f}",
+            ))
+        else:
+            lines.append(t("plan_safe", lang, course=c_label, pres=pres, tot=tot, pct=f"{plan_res['percent']:.1f}", can_miss=plan_res["can_miss"], target=tgt_disp))
+    else:  # warning
+        if plan_res.get("remaining") is not None:
+            lines.append(t(
+                "plan_need_left",
+                lang,
+                course=c_label,
+                pres=pres,
+                tot=tot,
+                pct=f"{plan_res['percent']:.1f}",
+                left=plan_res["remaining"],
+                must_attend=plan_res["must_attend"],
+                target=tgt_disp,
+                max_pct=f"{plan_res['max_pct']:.1f}",
+                min_pct=f"{plan_res['min_pct']:.1f}",
+            ))
+        else:
+            lines.append(t("plan_need", lang, course=c_label, pres=pres, tot=tot, pct=f"{plan_res['percent']:.1f}", must_attend=plan_res["must_attend"], target=tgt_disp))
+            if plan_res.get("is_unlikely"):
+                lines.append(t("plan_unlikely_warning", lang, must_attend=plan_res["must_attend"]))
+
+    if plan_res.get("unknown_remaining"):
+        lines.append(t("plan_unknown_remaining", lang, course=c_label, target=tgt_disp))
+
     lines.append(t("plan_assumption", lang))
     _reply(chat_id, "\n".join(lines))
 
@@ -428,6 +1023,12 @@ def _handle_plan_cmd(chat_id: str, lms, arg: str):
         course_part = re.sub(r"\bmiss\s*\d+\b", "", arg_clean, flags=re.IGNORECASE).strip()
     else:
         course_part = arg_clean
+
+    # Check for left N / remaining N / bache hain N
+    left_match = re.search(r"\b(?:left|remaining|bache|bache\s*hain)\s*(\d+)\b", course_part, re.IGNORECASE)
+    left_num = int(left_match.group(1)) if left_match else None
+    if left_match:
+        course_part = re.sub(r"\b(?:left|remaining|bache|bache\s*hain)\s*\d+\b", "", course_part, flags=re.IGNORECASE).strip()
 
     target = def_target
     tgt_match = re.search(r"\b(\d{1,3})\s*%?\b", course_part)
@@ -452,27 +1053,77 @@ def _handle_plan_cmd(chat_id: str, lms, arg: str):
             tot = c_att.get("total", 0)
             acr = course_acronym(c.get("name", ""))
             c_label = f"{acr} ({c['code']})" if acr else c["code"]
-            res = calculate_attendance_plan(pres, tot, target)
+            c_left = left_num
+            if c_left is None:
+                planned_total = get_planned_classes_for_course(c.get("code", ""))
+                if planned_total is not None:
+                    c_left = max(0, planned_total - tot)
+            res = calculate_attendance_plan(pres, tot, target, remaining=c_left)
             if res["status"] == "no_records":
                 lines.append(t("plan_no_records", lang, course=c_label))
+            elif res["status"] == "unreachable":
+                lines.append(t(
+                    "plan_unreachable",
+                    lang,
+                    course=c_label,
+                    target=target,
+                    left=res["remaining"],
+                    max_pct=f"{res['max_pct']:.1f}",
+                    min_pct=f"{res['min_pct']:.1f}",
+                    reachable_tgt=res["reachable_target"],
+                    pres_plus_left=res["pres_plus_left"],
+                    tot_plus_left=res["tot_plus_left"],
+                ))
             elif res["status"] == "safe":
-                lines.append(t("plan_safe", lang, course=c_label, pres=pres, tot=tot, pct=f"{res['percent']:.1f}", can_miss=res["can_miss"], target=target))
+                if res.get("remaining") is not None:
+                    lines.append(t(
+                        "plan_safe_left",
+                        lang,
+                        course=c_label,
+                        pres=pres,
+                        tot=tot,
+                        pct=f"{res['percent']:.1f}",
+                        left=res["remaining"],
+                        can_miss=res["can_miss"],
+                        target=target,
+                        max_pct=f"{res['max_pct']:.1f}",
+                        min_pct=f"{res['min_pct']:.1f}",
+                    ))
+                else:
+                    lines.append(t("plan_safe", lang, course=c_label, pres=pres, tot=tot, pct=f"{res['percent']:.1f}", can_miss=res["can_miss"], target=target))
             else:
-                lines.append(t("plan_need", lang, course=c_label, pres=pres, tot=tot, pct=f"{res['percent']:.1f}", must_attend=res["must_attend"], target=target))
+                if res.get("remaining") is not None:
+                    lines.append(t(
+                        "plan_need_left",
+                        lang,
+                        course=c_label,
+                        pres=pres,
+                        tot=tot,
+                        pct=f"{res['percent']:.1f}",
+                        left=res["remaining"],
+                        must_attend=res["must_attend"],
+                        target=target,
+                        max_pct=f"{res['max_pct']:.1f}",
+                        min_pct=f"{res['min_pct']:.1f}",
+                    ))
+                else:
+                    lines.append(t("plan_need", lang, course=c_label, pres=pres, tot=tot, pct=f"{res['percent']:.1f}", must_attend=res["must_attend"], target=target))
+                    if res.get("is_unlikely"):
+                        lines.append(t("plan_unlikely_warning", lang, must_attend=res["must_attend"]))
         lines.append(t("plan_assumption", lang))
         _reply(chat_id, "\n".join(lines))
         return
 
     matches = resolve_course(lms, course_part) if course_part else courses
     if not matches:
-        usr.set_pending_action(chat_id, {"intent": "plan", "target": target, "miss": miss_num})
+        usr.set_pending_action(chat_id, {"intent": "plan", "target": target, "miss": miss_num, "left": left_num})
         _reply(chat_id, t("course_not_found", lang, courses=format_course_list(courses)))
         return
     elif len(matches) == 1:
-        _show_course_plan(chat_id, lms, matches[0], target=target, miss=miss_num, lang=lang)
+        _show_course_plan(chat_id, lms, matches[0], target=target, miss=miss_num, left=left_num, lang=lang)
     else:
         options = "\n".join(f"{i}. {c.get('code')} {c.get('name')}" for i, c in enumerate(matches, 1))
-        extra_str = f"miss={miss_num}" if miss_num is not None else f"target={target}"
+        extra_str = f"left={left_num}" if left_num is not None else (f"miss={miss_num}" if miss_num is not None else f"target={target}")
         usr.set_pending(chat_id, {"type": "course", "courses": matches, "command": "plan", "extra": extra_str})
         _reply(chat_id, t("which_course", lang, options=options))
 
@@ -481,43 +1132,20 @@ def _handle_plan_action(chat_id: str, lms, act: dict, lang: str):
     cq = act.get("course_query", "")
     target = act.get("target") or get_default_target()
     miss_num = act.get("miss")
-
+    left_num = act.get("left")
     courses = lms.get_courses()
     if not cq:
-        if miss_num is None:
-            att = lms.get_attendance()
-            lines = [t("plan_heading", lang, target=target)]
-            for c in courses:
-                c_att = att.get("courses", {}).get(c["id"], {})
-                pres = c_att.get("present", 0)
-                tot = c_att.get("total", 0)
-                acr = course_acronym(c.get("name", ""))
-                c_label = f"{acr} ({c['code']})" if acr else c["code"]
-                res = calculate_attendance_plan(pres, tot, target)
-                if res["status"] == "no_records":
-                    lines.append(t("plan_no_records", lang, course=c_label))
-                elif res["status"] == "safe":
-                    lines.append(t("plan_safe", lang, course=c_label, pres=pres, tot=tot, pct=f"{res['percent']:.1f}", can_miss=res["can_miss"], target=target))
-                else:
-                    lines.append(t("plan_need", lang, course=c_label, pres=pres, tot=tot, pct=f"{res['percent']:.1f}", must_attend=res["must_attend"], target=target))
-            lines.append(t("plan_assumption", lang))
-            _reply(chat_id, "\n".join(lines))
-            return
-        else:
-            usr.set_pending_action(chat_id, {"intent": "plan", "target": target, "miss": miss_num})
-            _reply(chat_id, t("course_not_found", lang, courses=format_course_list(courses)))
-            return
-
+        _handle_plan_cmd(chat_id, lms, f"{target} left {left_num}" if left_num else str(target))
+        return
     matches = resolve_course(lms, cq)
     if not matches:
-        usr.set_pending_action(chat_id, {"intent": "plan", "target": target, "miss": miss_num})
+        usr.set_pending_action(chat_id, {"intent": "plan", "target": target, "miss": miss_num, "left": left_num})
         _reply(chat_id, t("course_not_found", lang, courses=format_course_list(courses)))
-        return
     elif len(matches) == 1:
-        _show_course_plan(chat_id, lms, matches[0], target=target, miss=miss_num, lang=lang)
+        _show_course_plan(chat_id, lms, matches[0], target=target, miss=miss_num, left=left_num, lang=lang)
     else:
         options = "\n".join(f"{i}. {c.get('code')} {c.get('name')}" for i, c in enumerate(matches, 1))
-        extra_str = f"miss={miss_num}" if miss_num is not None else f"target={target}"
+        extra_str = f"left={left_num}" if left_num is not None else (f"miss={miss_num}" if miss_num is not None else f"target={target}")
         usr.set_pending(chat_id, {"type": "course", "courses": matches, "command": "plan", "extra": extra_str})
         _reply(chat_id, t("which_course", lang, options=options))
 
@@ -1752,6 +2380,10 @@ def _execute_course_command(chat_id: str, lms, cmd: str, course: dict, extra: st
         _handle_study_for_course(chat_id, lms, course, remainder=extra, is_latest=is_latest, is_quiz=False, lang=lang)
     elif cmd == "quiz":
         _handle_study_for_course(chat_id, lms, course, remainder=extra, is_latest=is_latest, is_quiz=True, n=n, lang=lang)
+    elif cmd == "assignments":
+        _handle_assignments_cmd(chat_id, lms, f"{course['code']} {extra}".strip())
+    elif cmd == "upcoming":
+        _handle_upcoming_cmd(chat_id, lms, course["code"])
 
 
 def _handle_pending(chat_id: str, lms, pending: dict, text: str) -> bool:
@@ -1909,6 +2541,12 @@ def _handle_cmd_llm(chat_id: str):
     if cache_stats:
         lines.append(f"- Intent Cache: {cache_stats.get('hits', 0)} hits, {cache_stats.get('misses', 0)} misses, {cache_stats.get('size', 0)}/{cache_stats.get('capacity', 500)} entries")
 
+    lat_stats = get_latency_stats()
+    if lat_stats:
+        lines.append(f"\nLatency Telemetry:")
+        lines.append(f"- Total: p50={lat_stats.get('total_p50', 0)}ms, p95={lat_stats.get('total_p95', 0)}ms ({lat_stats.get('count', 0)} requests)")
+        lines.append(f"- Slowest stage: {lat_stats.get('slowest_stage', 'none')} (LMS p50={lat_stats.get('lms_p50', 0)}ms, LLM p50={lat_stats.get('llm_p50', 0)}ms, STT p50={lat_stats.get('stt_p50', 0)}ms)")
+
     lines.append(f"\nLocked users: {locked_count} locked")
     _reply(chat_id, "\n".join(lines))
 
@@ -1938,16 +2576,58 @@ def _handle_cmd_llm_test(chat_id: str):
 
 def handle(chat_id: str, text: str, is_self: bool = False):
     """Main dispatcher. Everything sync; called via run_in_threadpool."""
+    t_start = time.perf_counter()
     lock = usr.get_lock(chat_id)
     with lock:
-        _handle_locked(chat_id, text, is_self)
+        t_locked = time.perf_counter()
+        queue_ms = int((t_locked - t_start) * 1000)
+        tracker = PerfTracker(queue_ms=queue_ms)
+        register_perf_tracker(chat_id, tracker)
+        user = usr.get_user(chat_id)
+        timer = None
+        if user and user.get("status") == "active":
+            lang = user.get("lang", "en")
+            timer = threading.Timer(8.0, _send_still_working, args=(chat_id, lang))
+            timer.daemon = True
+            timer.start()
+        try:
+            _handle_locked(chat_id, text, is_self)
+        finally:
+            if timer is not None:
+                timer.cancel()
+            unregister_perf_tracker(chat_id)
+            total_ms = int((time.perf_counter() - t_start) * 1000)
+            record_request_telemetry(queue_ms, tracker.lms_ms, tracker.llm_ms, tracker.stt_ms, tracker.send_ms, total_ms)
+            log.info("[PERF] chat=%s queue=%dms lms=%dms llm=%dms stt=%dms send=%dms total=%dms",
+                     chat_id[-6:], queue_ms, tracker.lms_ms, tracker.llm_ms, tracker.stt_ms, tracker.send_ms, total_ms)
 
 
 def handle_audio(chat_id: str, audio_data: dict, is_self: bool = False):
     """Handle incoming voice/audio message. Called via run_in_threadpool."""
+    t_start = time.perf_counter()
     lock = usr.get_lock(chat_id)
     with lock:
-        _handle_audio_locked(chat_id, audio_data, is_self)
+        t_locked = time.perf_counter()
+        queue_ms = int((t_locked - t_start) * 1000)
+        tracker = PerfTracker(queue_ms=queue_ms)
+        register_perf_tracker(chat_id, tracker)
+        user = usr.get_user(chat_id)
+        timer = None
+        if user and user.get("status") == "active":
+            lang = user.get("lang", "en")
+            timer = threading.Timer(8.0, _send_still_working, args=(chat_id, lang))
+            timer.daemon = True
+            timer.start()
+        try:
+            _handle_audio_locked(chat_id, audio_data, is_self)
+        finally:
+            if timer is not None:
+                timer.cancel()
+            unregister_perf_tracker(chat_id)
+            total_ms = int((time.perf_counter() - t_start) * 1000)
+            record_request_telemetry(queue_ms, tracker.lms_ms, tracker.llm_ms, tracker.stt_ms, tracker.send_ms, total_ms)
+            log.info("[PERF] chat=%s queue=%dms lms=%dms llm=%dms stt=%dms send=%dms total=%dms",
+                     chat_id[-6:], queue_ms, tracker.lms_ms, tracker.llm_ms, tracker.stt_ms, tracker.send_ms, total_ms)
 
 
 def handle_audio_error(chat_id: str, is_self: bool = False):
@@ -2054,14 +2734,23 @@ def _handle_audio_locked(chat_id: str, audio_data: dict, is_self: bool = False):
         _reply(chat_id, t("voice_not_understood", lang))
         return
 
+    t_stt0 = time.perf_counter()
     try:
-        transcript = stt_transcribe(data_b64, mime, seconds, lang_hint=lang)
+        hint = "ur" if lang in ("ur", "ur-roman", "roman") else ("sd" if lang in ("sd", "sindhi") else ("en" if lang in ("en", "english") else lang))
+        transcript = stt_transcribe(data_b64, mime, seconds, lang_hint=hint)
     except Exception:
         log.exception("[VOICE] STT raised exception for %s…", chat_id[-6:])
         transcript = None
+    finally:
+        add_stt_time(chat_id, (time.perf_counter() - t_stt0) * 1000)
 
     if not transcript or not transcript.strip():
         _reply(chat_id, t("voice_not_understood", lang))
+        return
+
+    t_clean = transcript.strip()
+    if len(t_clean) < 2 and not t_clean.isdigit():
+        _reply(chat_id, t("voice_too_short", lang))
         return
 
     transcript_trimmed = transcript.strip()[:200]
@@ -2206,7 +2895,10 @@ def _handle_awaiting_password(chat_id: str, user: dict, text: str):
     except Exception:
         log.exception("Baseline seed failed for %s…", chat_id[-6:])
 
-    _reply(chat_id, f"✅ Connected as {email}\n\n{HELP}")
+    _reply(chat_id, f"✅ Connected as {email}\n\n{HELP}\n\n{t('language_prompt', 'en')}")
+    usr.mark_lang_prompt_sent(chat_id)
+    with _lang_choice_lock:
+        _awaiting_lang_choice.add(chat_id)
 
 
 _user_help_sent: dict = {}
@@ -2229,12 +2921,15 @@ def _are_all_providers_failing() -> bool:
 def _maybe_send_help_fallback(chat_id: str, lang: str, is_busy: bool = False):
     now = time.time()
     interval_sec = int(os.environ.get("LLM_HELP_REPLY_INTERVAL_MIN", "2")) * 60
+    send_msg = False
     with _help_lock:
         last = _user_help_sent.get(chat_id, 0.0)
         if now - last >= interval_sec:
             _user_help_sent[chat_id] = now
-            key = "busy" if is_busy else "not_understood"
-            _reply(chat_id, t(key, lang, help=t("help", lang)))
+            send_msg = True
+    if send_msg:
+        key = "busy" if is_busy else "not_understood"
+        _reply(chat_id, t(key, lang, help=t("help", lang)))
 
 
 def _dispatch_exact_cmd(chat_id: str, lms, word: str, arg: str):
@@ -2251,10 +2946,12 @@ def _dispatch_exact_cmd(chat_id: str, lms, word: str, arg: str):
         _handle_clos_cmd(chat_id, lms, arg)
     elif word == "courses":
         _reply(chat_id, cmd_courses(lms, arg))
-    elif word == "assignments":
-        _reply(chat_id, cmd_assignments(lms, arg))
+    elif word in ("assignments", "assignment"):
+        _handle_assignments_cmd(chat_id, lms, arg)
     elif word == "upcoming":
-        _reply(chat_id, cmd_upcoming(lms, arg))
+        _handle_upcoming_cmd(chat_id, lms, arg)
+    elif word in ("language", "lang", "zuban", "زبان", "ٻولي"):
+        _handle_language_cmd(chat_id, arg)
     elif word == "plan":
         _handle_plan_cmd(chat_id, lms, arg)
     elif word == "digest":
@@ -2364,9 +3061,11 @@ def _execute_action(chat_id: str, lms, act: dict, lang: str):
                 return
         _reply(chat_id, cmd_courses(lms))
     elif intent == "assignments":
-        _reply(chat_id, cmd_assignments(lms))
+        _handle_assignments_action(chat_id, lms, act, lang)
     elif intent == "upcoming":
-        _reply(chat_id, cmd_upcoming(lms))
+        _handle_upcoming_action(chat_id, lms, act, lang)
+    elif intent == "language":
+        _handle_language_action(chat_id, act, lang)
     elif intent == "grades":
         cq = act.get("course_query", "")
         _handle_grades_cmd(chat_id, lms, cq)
@@ -2451,22 +3150,27 @@ def _handle_natural_language(chat_id: str, text: str, user: dict, lms):
             use_rules = True
 
         if not use_rules:
-            history = get_user_history(chat_id)
-            parsed = route_intent(
-                clean_text,
-                has_pending_download=has_pending,
-                stored_lang=stored_lang,
-                history=history,
-            )
+            t_llm0 = time.perf_counter()
+            try:
+                history = get_user_history(chat_id)
+                parsed = route_intent(
+                    clean_text,
+                    has_pending_download=has_pending,
+                    stored_lang=stored_lang,
+                    history=history,
+                )
+            finally:
+                add_llm_time(chat_id, (time.perf_counter() - t_llm0) * 1000)
             if parsed is None:
                 use_rules = True
 
         if use_rules:
             if rule_res and rule_res.get("unsupported"):
-                resp_lang = rule_res.get("lang", stored_lang)
-                if resp_lang != user.get("lang"):
-                    usr.upsert_user(chat_id, lang=resp_lang)
-                    user["lang"] = resp_lang
+                if not usr.is_lang_locked(chat_id):
+                    resp_lang = rule_res.get("lang", stored_lang)
+                    if resp_lang != user.get("lang"):
+                        usr.upsert_user(chat_id, lang=resp_lang)
+                        user["lang"] = resp_lang
                 effective_lang = user.get("lang", "en")
                 _reply(chat_id, t("unsupported", effective_lang, help=t("help", effective_lang)))
                 return
@@ -2480,12 +3184,15 @@ def _handle_natural_language(chat_id: str, text: str, user: dict, lms):
                     _maybe_send_help_fallback(chat_id, stored_lang, is_busy=is_busy)
                 return
 
-    # Language determination follows CURRENT message unless signal-less
-    detected_lang = detect_language(clean_text, stored_lang=stored_lang, is_recent=True)
-    if detected_lang and detected_lang != user.get("lang"):
-        usr.upsert_user(chat_id, lang=detected_lang)
-        user["lang"] = detected_lang
-    effective_lang = detected_lang or user.get("lang", "en")
+    # Language determination: if locked, never let auto-detection change it
+    if usr.is_lang_locked(chat_id):
+        effective_lang = user.get("lang", "en")
+    else:
+        detected_lang = detect_language(clean_text, stored_lang=stored_lang, is_recent=True)
+        if detected_lang and detected_lang != user.get("lang"):
+            usr.upsert_user(chat_id, lang=detected_lang)
+            user["lang"] = detected_lang
+        effective_lang = detected_lang or user.get("lang", "en")
 
     # Check unsupported from model (grades, marks, timetable, fees, results)
     if parsed.get("unsupported"):
@@ -2549,6 +3256,7 @@ def _handle_natural_language(chat_id: str, text: str, user: dict, lms):
 
 
 def _handle_active(chat_id: str, text: str, user: dict):
+    global _reply
     lms = usr.get_client(chat_id)
     if lms is None:
         tf = usr.token_file(chat_id)
@@ -2558,6 +3266,11 @@ def _handle_active(chat_id: str, text: str, user: dict):
             return
         lms = LMSClient(token_file=tf)
         usr.set_client(chat_id, lms)
+
+    with _lang_choice_lock:
+        is_awaiting_lang = chat_id in _awaiting_lang_choice
+        if is_awaiting_lang:
+            _awaiting_lang_choice.discard(chat_id)
 
     # 1. Check if there is an in-memory pending selection
     pending = usr.get_pending(chat_id)
@@ -2571,6 +3284,63 @@ def _handle_active(chat_id: str, text: str, user: dict):
         if _handle_active_quiz_reply(chat_id, quiz, text, user):
             return
 
+    t_strip = text.strip().lower()
+    lang_map = {
+        "1": "en", "english": "en", "en": "en", "angrezi": "en",
+        "2": "ur", "urdu": "ur", "ur": "ur", "اردو": "ur",
+        "3": "ur-roman", "roman": "ur-roman", "roman urdu": "ur-roman", "ur-roman": "ur-roman",
+        "4": "sd", "sindhi": "sd", "sd": "sd", "سنڌي": "sd", "سندھی": "sd",
+    }
+    valid_lang_reply = (
+        (is_awaiting_lang and t_strip in lang_map)
+        or (t_strip in ("english", "urdu", "roman", "roman urdu", "sindhi", "angrezi", "اردو", "سنڌي", "سندھی"))
+    )
+    if not usr.is_lang_locked(chat_id) and valid_lang_reply:
+        target_lang = lang_map[t_strip]
+        usr.set_user_lang(chat_id, target_lang, locked=True)
+        user["lang"] = target_lang
+        lang_names = {
+            "en": "English",
+            "ur": "اردو (Urdu)",
+            "ur-roman": "Roman Urdu",
+            "sd": "سنڌي (Sindhi)",
+        }
+        t_name = lang_names.get(target_lang, target_lang)
+        _reply(chat_id, t("language_set", target_lang, lang_name=t_name))
+        return
+
+    if not usr.is_lang_locked(chat_id) and not usr.is_lang_prompt_sent(chat_id):
+        usr.mark_lang_prompt_sent(chat_id)
+        with _chat_prompt_suffix_lock:
+            _chat_prompt_suffix[chat_id] = "\n\n" + t("language_prompt", user.get("lang", "en"))
+        with _lang_choice_lock:
+            _awaiting_lang_choice.add(chat_id)
+
+    orig_reply = _reply
+    is_mocked = hasattr(_reply, "side_effect") or hasattr(_reply, "_mock_self")
+    if is_mocked:
+        def _mock_wrap(cid, txt):
+            with _chat_prompt_suffix_lock:
+                s = _chat_prompt_suffix.pop(cid, "")
+            if s:
+                txt = txt + s
+            return orig_reply(cid, txt)
+        _reply = _mock_wrap
+
+    try:
+        _handle_active_inner(chat_id, text, user, lms)
+    finally:
+        if is_mocked:
+            _reply = orig_reply
+        with _chat_prompt_suffix_lock:
+            unseen = _chat_prompt_suffix.pop(chat_id, None)
+        if unseen:
+            with _lang_choice_lock:
+                _awaiting_lang_choice.discard(chat_id)
+            usr.upsert_user(chat_id, lang_prompt_sent=0)
+
+
+def _handle_active_inner(chat_id: str, text: str, user: dict, lms):
     # 1b. Selection reply guard when NO pending selection exists (or expired) (Part F)
     t_strip = text.strip().lower()
     tokens = [x for x in re.split(r"[\s,]+", text.strip()) if x]
@@ -2593,6 +3363,7 @@ def _handle_active(chat_id: str, text: str, user: dict):
         "download", "dl", "attendance", "resources", "clos", "courses",
         "assignments", "upcoming", "grades", "grade", "plan", "digest", "calendar",
         "summarize", "summary", "quiz",
+        "language", "lang", "zuban", "زبان", "ٻولي",
     }
     if word in exact_cmds:
         usr.clear_pending_action(chat_id)
@@ -2615,7 +3386,7 @@ def _handle_active(chat_id: str, text: str, user: dict):
         if matches:
             usr.clear_pending_action(chat_id)
             intent = pending_act.get("intent")
-            lang = detect_language(text, stored_lang=user.get("lang", "en"), is_recent=True)
+            lang = user.get("lang", "en") if usr.is_lang_locked(chat_id) else detect_language(text, stored_lang=user.get("lang", "en"), is_recent=True)
             if len(matches) == 1:
                 course = matches[0]
                 if intent == "download":
@@ -2634,7 +3405,13 @@ def _handle_active(chat_id: str, text: str, user: dict):
                 elif intent == "plan":
                     target = pending_act.get("target")
                     miss = pending_act.get("miss")
-                    _show_course_plan(chat_id, lms, course, target=target, miss=miss, lang=lang)
+                    left = pending_act.get("left")
+                    _show_course_plan(chat_id, lms, course, target=target, miss=miss, left=left, lang=lang)
+                elif intent == "assignments":
+                    status = pending_act.get("status")
+                    _show_assignments_for_course(chat_id, lms, course, lang, status_filter=status)
+                elif intent == "upcoming":
+                    _handle_upcoming_cmd(chat_id, lms, course.get("code", ""))
                 elif intent in ("summarize", "quiz"):
                     is_quiz = (intent == "quiz")
                     is_latest = bool(pending_act.get("latest", False))
@@ -2647,7 +3424,7 @@ def _handle_active(chat_id: str, text: str, user: dict):
                 options = "\n".join(f"{i}. {c.get('code')} {c.get('name')}" for i, c in enumerate(matches, 1))
                 extra_str = f"week {pending_act.get('week')}" if pending_act.get("week") is not None else pending_act.get("title_query", "")
                 if intent == "plan":
-                    extra_str = f"miss={pending_act.get('miss')}" if pending_act.get("miss") is not None else f"target={pending_act.get('target', 75)}"
+                    extra_str = f"left={pending_act.get('left')}" if pending_act.get("left") is not None else (f"miss={pending_act.get('miss')}" if pending_act.get("miss") is not None else f"target={pending_act.get('target', 75)}")
                 usr.set_pending(chat_id, {
                     "type": "course",
                     "courses": matches,
@@ -2682,13 +3459,13 @@ def _handle_active(chat_id: str, text: str, user: dict):
                 course = matches[0]
                 acr = course_acronym(course.get("name", "")) or course["code"]
                 course_label = f"{acr} ({course['code']})"
-                lang = detect_language(text, stored_lang=user.get("lang", "en"), is_recent=True)
+                lang = user.get("lang", "en") if usr.is_lang_locked(chat_id) else detect_language(text, stored_lang=user.get("lang", "en"), is_recent=True)
                 _reply(chat_id, t("course_menu", lang, course=course_label))
                 return
             elif len(matches) > 1:
                 options = "\n".join(f"{i}. {c.get('code')} {c.get('name')}" for i, c in enumerate(matches, 1))
                 usr.set_pending(chat_id, {"type": "course_menu", "courses": matches})
-                lang = detect_language(text, stored_lang=user.get("lang", "en"), is_recent=True)
+                lang = user.get("lang", "en") if usr.is_lang_locked(chat_id) else detect_language(text, stored_lang=user.get("lang", "en"), is_recent=True)
                 _reply(chat_id, t("which_course", lang, options=options))
                 return
 

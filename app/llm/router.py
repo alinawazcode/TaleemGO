@@ -36,8 +36,9 @@ except ImportError:
 log = logging.getLogger("taleemgo.llm.router")
 
 DEFAULT_PROVIDERS = "gemini,groq"
-TOTAL_TIME_BUDGET = 12.0
-PER_REQUEST_TIMEOUT = 6.0
+INTENT_TIMEOUT_SECONDS = float(os.environ.get("INTENT_TIMEOUT_SECONDS", "6.0"))
+TOTAL_TIME_BUDGET = INTENT_TIMEOUT_SECONDS
+PER_REQUEST_TIMEOUT = INTENT_TIMEOUT_SECONDS
 
 
 def get_configured_providers() -> list[str]:
@@ -84,7 +85,8 @@ def route_intent(
         return cached
 
     providers = get_configured_providers()
-    deadline = time.time() + TOTAL_TIME_BUDGET
+    intent_timeout = float(os.environ.get("INTENT_TIMEOUT_SECONDS", str(TOTAL_TIME_BUDGET)))
+    deadline = time.time() + intent_timeout
 
     system_prompt = build_system_prompt(
         user_text=sanitized_text,

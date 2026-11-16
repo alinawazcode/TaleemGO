@@ -82,6 +82,10 @@ def init_db():
             c.execute(f"ALTER TABLE users ADD COLUMN digest_time TEXT NOT NULL DEFAULT '{def_time}'")
         if "digest_last_date" not in cols:
             c.execute("ALTER TABLE users ADD COLUMN digest_last_date TEXT")
+        if "lang_locked" not in cols:
+            c.execute("ALTER TABLE users ADD COLUMN lang_locked INTEGER NOT NULL DEFAULT 0")
+        if "lang_prompt_sent" not in cols:
+            c.execute("ALTER TABLE users ADD COLUMN lang_prompt_sent INTEGER NOT NULL DEFAULT 0")
 
         c.execute("""
             CREATE TABLE IF NOT EXISTS i18n_cache (
@@ -301,6 +305,35 @@ def record_digest_sent(chat_id: str, date_str: str):
     upsert_user(chat_id, digest_last_date=date_str)
 
 
+def get_user_lang(chat_id: str) -> tuple[str, bool]:
+    """Return (lang, is_locked) for user."""
+    u = get_user(chat_id)
+    if not u:
+        return "en", False
+    return u.get("lang") or "en", bool(u.get("lang_locked"))
+
+
+def set_user_lang(chat_id: str, lang: str, locked: bool = True):
+    """Store chosen language and lock state for user."""
+    upsert_user(chat_id, lang=lang, lang_locked=1 if locked else 0)
+
+
+def is_lang_locked(chat_id: str) -> bool:
+    """Check if user has an explicitly locked language mode."""
+    u = get_user(chat_id)
+    return bool(u and u.get("lang_locked"))
+
+
+def mark_lang_prompt_sent(chat_id: str):
+    """Mark that one-time language prompt was presented to user."""
+    upsert_user(chat_id, lang_prompt_sent=1)
+
+
+def is_lang_prompt_sent(chat_id: str) -> bool:
+    u = get_user(chat_id)
+    return bool(u and u.get("lang_prompt_sent"))
+
+
 def get_users_summary() -> list[dict]:
     with _db_lock, _conn() as c:
         rows = c.execute("SELECT chat_id, email, status, is_admin, created_at, last_seen FROM users ORDER BY created_at ASC").fetchall()
@@ -328,6 +361,11 @@ def get_client(chat_id: str):
 
 
 def set_client(chat_id: str, client):
+    if client is not None:
+        try:
+            client.chat_id = chat_id
+        except Exception:
+            pass
     with _cache_lock:
         _client_cache[chat_id] = client
 

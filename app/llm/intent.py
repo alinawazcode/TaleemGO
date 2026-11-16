@@ -32,6 +32,7 @@ ALLOWED_INTENTS = {
     "clos",
     "download",
     "choose",
+    "language",
 }
 
 ALLOWED_CLARIFY = {"course", "week", "what"}
@@ -149,7 +150,7 @@ def validate_intent_response(data: dict, has_pending_download: bool = False) -> 
         # Check allowed keys per action
         allowed_act_keys = {
             "intent", "course_query", "title_query", "week", "numbers", "all", "cancel", "latest",
-            "target", "miss", "enable", "time", "n",
+            "target", "miss", "enable", "time", "n", "mode", "status", "left",
         }
         if not set(act.keys()).issubset(allowed_act_keys):
             unknown_act = set(act.keys()) - allowed_act_keys
@@ -192,6 +193,24 @@ def validate_intent_response(data: dict, has_pending_download: bool = False) -> 
             if not _validate_clean_string(tm, 10):
                 raise ValueError(f"Invalid time string: {tm}")
             val_act["time"] = tm.strip()
+
+        if "left" in act and act["left"] is not None:
+            l_val = act["left"]
+            if isinstance(l_val, bool) or not isinstance(l_val, int) or l_val < 0 or l_val > 100:
+                raise ValueError(f"Invalid left count: {l_val}")
+            val_act["left"] = l_val
+
+        if "status" in act and act["status"] is not None:
+            st_val = str(act["status"]).lower().strip()
+            if st_val not in ("pending", "overdue", "submitted", "all"):
+                raise ValueError(f"Invalid status: {st_val}")
+            val_act["status"] = st_val
+
+        if "mode" in act and act["mode"] is not None:
+            m_val = str(act["mode"]).lower().strip()
+            if not _validate_clean_string(m_val, 20):
+                raise ValueError(f"Invalid mode: {m_val}")
+            val_act["mode"] = m_val
 
         if "course_query" in act and act["course_query"] is not None:
             cq = act["course_query"]
