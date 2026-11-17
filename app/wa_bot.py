@@ -93,10 +93,12 @@ try:
     from app.llm.intent import add_user_history, get_user_history
     from app.llm.providers import (
         PROVIDER_CONFIGS,
+        get_invalid_messages_count,
         get_key_for_instance,
         get_provider_key_instances,
         get_provider_keys,
         is_valid_api_key,
+        record_invalid_message,
         registry,
         run_live_check,
     )
@@ -114,10 +116,12 @@ except ImportError:
     from llm.intent import add_user_history, get_user_history
     from llm.providers import (
         PROVIDER_CONFIGS,
+        get_invalid_messages_count,
         get_key_for_instance,
         get_provider_key_instances,
         get_provider_keys,
         is_valid_api_key,
+        record_invalid_message,
         registry,
         run_live_check,
     )
@@ -2510,6 +2514,8 @@ def _handle_cmd_llm(chat_id: str):
         calls = data["calls_today"]
         last_err = data["last_error"]
         line = f"- {prov}: {status} (model: {model}) | calls today: {calls} | last error: {last_err}"
+        if data.get("last_400_reason"):
+            line += f" | last 400: {data['last_400_reason']}"
 
         usage_parts = []
         if data.get("rpm_pct") is not None:
@@ -2534,10 +2540,14 @@ def _handle_cmd_llm(chat_id: str):
             lines.append(f"- {prov} (STT): {status} (model: {model}) | calls today: {calls} | last error: {last_err}")
 
     # Telemetry for capacity, rules-first, and cache
-    if rf_stats:
-        rules_pct = rf_stats.get("rule_share_pct", 0.0)
+    inv_count = get_invalid_messages_count()
+    if rf_stats or inv_count > 0:
         lines.append(f"\nThroughput & Optimization:")
-        lines.append(f"- Rules-first: {rf_stats.get('rules_handled', 0)}/{rf_stats.get('total', 0)} ({rules_pct}% rule-handled)")
+        if rf_stats:
+            rules_pct = rf_stats.get("rule_share_pct", 0.0)
+            lines.append(f"- Rules-first: {rf_stats.get('rules_handled', 0)}/{rf_stats.get('total', 0)} ({rules_pct}% rule-handled)")
+        if inv_count > 0:
+            lines.append(f"- Invalid messages rejected: {inv_count}")
     if cache_stats:
         lines.append(f"- Intent Cache: {cache_stats.get('hits', 0)} hits, {cache_stats.get('misses', 0)} misses, {cache_stats.get('size', 0)}/{cache_stats.get('capacity', 500)} entries")
 
@@ -3121,7 +3131,8 @@ def _handle_natural_language(chat_id: str, text: str, user: dict, lms):
             _reply(chat_id, t("lock_notice", lang, hours=hours, help=t("help", lang)))
         return
 
-    if not clean_text:
+    if not clean_text or not clean_text.strip():
+        record_invalid_message()
         return
 
     # 3. Pre-filter jailbreak check (instant 2 strikes and lockout without calling provider)

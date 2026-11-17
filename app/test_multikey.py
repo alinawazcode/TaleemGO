@@ -342,7 +342,7 @@ class TestKeyPrivacyInLogsAndTelemetry(unittest.TestCase):
         }):
             sent_replies = []
             with patch.object(wa_bot, "_reply", side_effect=lambda cid, msg: sent_replies.append(msg)), \
-                 patch.object(usr, "count_locked_users", return_value=0):
+                 patch.object(wa_bot.usr, "count_locked_users", return_value=0):
                 wa_bot._handle_cmd_llm("admin@c.us")
 
             self.assertEqual(len(sent_replies), 1)
